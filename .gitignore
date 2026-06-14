@@ -1,0 +1,42 @@
+# Android
+*.apk
+*.ap_
+*.aab
+*.dex
+build/
+local.properties
+.idea/
+*.iml
+.gradle/
+
+# iOS
+packages/
+obj/
+.theos/
+*.deb
+
+# Server
+logs/
+certs/
+*.crt
+*.key
+*.pem
+*.csr
+
+# Node
+node_modules/
+
+# Android backup/archives (already extracted)
+android/dolby_beta_master.zip
+android/unm-latest.zip
+android/unm-pack/
+android/unm-extracted/
+android/unm-original/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+.temp/
+*.log

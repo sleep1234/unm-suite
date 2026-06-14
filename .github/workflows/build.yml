@@ -1,0 +1,65 @@
+name: Build UNM Suite
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x android/dolby_beta_src/gradlew
+
+      - name: Build APK with Gradle
+        working-directory: android/dolby_beta_src
+        run: ./gradlew app:assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolby-beta-apk
+          path: android/dolby_beta_src/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+  build-ios:
+    name: iOS Tweak (Theos)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          brew install ldid
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: Build UNMHook
+        working-directory: ios/UNMHook
+        run: |
+          make clean && make package
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: unmhook-deb
+          path: ios/UNMHook/packages/*.deb
+          if-no-files-found: warn
+          retention-days: 30

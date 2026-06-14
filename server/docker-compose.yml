@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  unm-server:
+    image: pan93412/unblock-netease-music-enhanced:latest
+    container_name: unm-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # HTTP 代理端口
+      - "8081:8081"   # HTTPS 代理端口
+    environment:
+      # 核心功能开关
+      - ENABLE_FLAC=true                    # 启用无损音质获取
+      - ENABLE_LOCAL_VIP=svip               # 本地黑胶VIP（svip级别）
+      - BLOCK_ADS=true                      # 屏蔽广告
+      - DISABLE_UPGRADE_CHECK=true          # 禁用更新检测
+      - FOLLOW_SOURCE_ORDER=true            # 严格按配置音源顺序查询
+
+      # 音质设置
+      - MIN_BR=320000                       # 最低音质 320kbps
+      - SELECT_MAX_BR=true                  # 选择最高码率替换
+
+      # 日志配置
+      - JSON_LOG=true                       # JSON格式日志
+      - LOG_LEVEL=info                      # 日志等级
+      - LOG_FILE=/app/logs/unm.log          # 日志文件路径
+
+      # 搜索设置
+      - SEARCH_ALBUM=true                   # 搜索时携带专辑名提高匹配率
+
+      # 自定义音源 API（备用）
+      # - PYNCMD_API=https://music-api.gdstudio.xyz/api.php
+    command:
+      - -o
+      - kuwo                # 酷我音乐（默认启用，稳定）
+      - kugou               # 酷狗音乐
+      - migu                # 咪咕音乐
+      - bilibili            # B站音乐
+      - pyncmd              # 第三方网易云API
+      - ytdlp               # YouTube（需要安装yt-dlp）
+      - -p
+      - "8080:8081"         # HTTP:HTTPS 端口
+      - -a
+      - "0.0.0.0"           # 监听所有接口（外网访问需配合严格模式）
+      # - -s                  # 严格模式（公网部署强烈建议开启，仅放行网易域名）
+      # - -t user:pass        # 代理认证（公网部署建议开启）
+    volumes:
+      - ./logs:/app/logs                    # 日志持久化
+      - ./certs:/app/certs                  # 证书目录（如需自定义证书）
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

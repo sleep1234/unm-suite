@@ -1,0 +1,9 @@
+Package: com.unm.unmhook
+Name: UNMHook
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: UnlockNeteaseMusic proxy hook for iOS
+Maintainer: TeleAgent
+Author: TeleAgent
+Section: Tweaks
+Depends: mobilesubstrate

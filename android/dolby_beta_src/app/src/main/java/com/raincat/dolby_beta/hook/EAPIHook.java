@@ -28,7 +28,12 @@ import de.robv.android.xposed.XposedBridge;
 
 public class EAPIHook {
     public EAPIHook(final Context context) {
-        XposedBridge.hookMethod(ClassHelper.HttpResponse.getResultMethod(context), new XC_MethodHook() {
+        Method resultMethod = ClassHelper.HttpResponse.getResultMethod(context);
+        if (resultMethod == null) {
+            XposedBridge.log("[dolby_beta] EAPIHook: core class not found, skipping EAPI hook");
+            return;
+        }
+        XposedBridge.hookMethod(resultMethod, new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 //代理和黑胶都未开启

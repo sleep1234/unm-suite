@@ -64,25 +64,17 @@ jobs:
         run: |
           mkdir -p $HOME/theos/sdks
           cd $HOME/theos/sdks
-          # Use community-maintained iPhoneOS SDK
-          curl -LO https://github.com/theos/sdks/archive/master.zip
-          unzip master.zip
-          mv sdks-master/iPhoneOS* . 2>/dev/null || true
-          # If theos/sdks repo doesn't have the SDK, try alternative
-          if [ ! -d "iPhoneOS15.0.sdk" ]; then
-            # Use whatever SDK version is available
-            SDK_DIR=$(find . -name "iPhoneOS*.sdk" -type d | head -1)
-            if [ -n "$SDK_DIR" ]; then
-              ln -s "$SDK_DIR" iPhoneOS15.0.sdk
-              echo "Linked $SDK_DIR -> iPhoneOS15.0.sdk"
-            fi
-          fi
-          ls -la
+          # Download community-maintained iOS SDK from theos/sdks
+          git clone --depth=1 https://github.com/theos/sdks.git
+          # List available SDKs
+          ls -la sdks/
+          # The Makefile uses 'latest' so Theos will pick the available one
+          # No symlink needed
 
       - name: Build UNMHook
         working-directory: ios/UNMHook
         run: |
-          make clean && make package
+          make clean && make package FINALPACKAGE=1
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4

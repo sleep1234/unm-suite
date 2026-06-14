@@ -50,16 +50,22 @@ public class NotificationHelper {
     @RequiresApi(api = Build.VERSION_CODES.M)
     public void sendUnLockNotification(Context context, int appId, String ticker, String title, String content) {
         Notification.Builder builder = new Notification.Builder(context);
-        ApplicationInfo applicationInfo = context.getApplicationInfo();
-        Drawable drawable = applicationInfo.loadIcon(context.getPackageManager());
-        Bitmap bitmap = Bitmap.createBitmap(drawable.getIntrinsicWidth(), drawable.getIntrinsicHeight(),
-                drawable.getOpacity() != PixelFormat.OPAQUE ? Bitmap.Config.ARGB_8888 : Bitmap.Config.RGB_565);
-        Canvas canvas = new Canvas(bitmap);
-        drawable.setBounds(0, 0, drawable.getIntrinsicWidth(), drawable.getIntrinsicHeight());
-        drawable.draw(canvas);
-        Icon icon = Icon.createWithBitmap(bitmap);
-        builder.setSmallIcon(icon)
-                .setContentIntent(PendingIntent.getActivity(context, 0, new Intent(), 0))
+        try {
+            ApplicationInfo applicationInfo = context.getApplicationInfo();
+            Drawable drawable = applicationInfo.loadIcon(context.getPackageManager());
+            Bitmap bitmap = Bitmap.createBitmap(drawable.getIntrinsicWidth(), drawable.getIntrinsicHeight(),
+                    drawable.getOpacity() != PixelFormat.OPAQUE ? Bitmap.Config.ARGB_8888 : Bitmap.Config.RGB_565);
+            Canvas canvas = new Canvas(bitmap);
+            drawable.setBounds(0, 0, drawable.getIntrinsicWidth(), drawable.getIntrinsicHeight());
+            drawable.draw(canvas);
+            Icon icon = Icon.createWithBitmap(bitmap);
+            builder.setSmallIcon(icon);
+        } catch (Exception e) {
+            builder.setSmallIcon(android.R.drawable.ic_dialog_info);
+        }
+        builder
+                .setContentIntent(PendingIntent.getActivity(context, 0, new Intent(),
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0))
                 .setContentTitle(title)
                 .setTicker(ticker)
                 .setAutoCancel(true)

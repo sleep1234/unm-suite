@@ -112,6 +112,11 @@ public class ProxyHook {
             }
         }
 
+        if (realCallClass == null) {
+            XposedBridge.log("[DolbyBeta] RealCall class not found, proxy hook skipped entirely");
+            return;
+        }
+
         hookAllConstructors(realCallClass, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {

@@ -12,6 +12,9 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // Xposed API (only available on jcenter/rovo89 repo)
+        maven { url "https://api.xposed.info/" }
+        jcenter()
         flatDir {
             dirs 'libs'
         }

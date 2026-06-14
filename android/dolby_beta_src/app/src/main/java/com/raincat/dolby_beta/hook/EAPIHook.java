@@ -12,6 +12,8 @@ import com.raincat.dolby_beta.helper.SettingHelper;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.lang.reflect.Method;
+
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 

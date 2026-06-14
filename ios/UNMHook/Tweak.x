@@ -21,8 +21,8 @@
 // UNM 代理服务器地址（你的 NAS IP 或域名）
 static NSString *const PROXY_HOST = @"www.zhp0104.fun";
 // UNM 代理服务器端口
-static NSInteger const PROXY_HTTP_PORT = 8080;
-static NSInteger const PROXY_HTTPS_PORT = 8081;
+static NSInteger const PROXY_HTTP_PORT = 18080;
+static NSInteger const PROXY_HTTPS_PORT = 18081;
 
 // 工作模式：0=代理模式（推荐），1=URL重写模式
 static int const WORK_MODE = 0;

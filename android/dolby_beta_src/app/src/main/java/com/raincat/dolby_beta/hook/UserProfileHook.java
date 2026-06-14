@@ -8,6 +8,7 @@ import com.raincat.dolby_beta.helper.ExtraHelper;
 import com.raincat.dolby_beta.helper.UserHelper;
 
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
 import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
@@ -48,10 +49,17 @@ public class UserProfileHook {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     super.afterHookedMethod(param);
                     new Thread(() -> {
-                        if (ExtraHelper.getExtraDate(ExtraHelper.COOKIE).equals("-1"))
-                            ExtraHelper.setExtraDate(ExtraHelper.COOKIE, ClassHelper.Cookie.getCookie(context));
-                        if (ExtraHelper.getExtraDate(ExtraHelper.USER_ID).equals("-1"))
-                            UserHelper.getUserInfo();
+                        try {
+                            if (ExtraHelper.getExtraDate(ExtraHelper.COOKIE).equals("-1")) {
+                                String cookie = ClassHelper.Cookie.getCookie(context);
+                                if (cookie != null && !cookie.isEmpty())
+                                    ExtraHelper.setExtraDate(ExtraHelper.COOKIE, cookie);
+                            }
+                            if (ExtraHelper.getExtraDate(ExtraHelper.USER_ID).equals("-1"))
+                                UserHelper.getUserInfo();
+                        } catch (Exception e) {
+                            XposedBridge.log("[dolby_beta] UserProfileHook cookie fetch failed: " + e.getMessage());
+                        }
                     }).start();
                 }
             });

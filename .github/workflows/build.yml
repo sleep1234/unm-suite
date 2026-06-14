@@ -62,14 +62,10 @@ jobs:
 
       - name: Download iOS SDK
         run: |
-          mkdir -p $HOME/theos/sdks
-          cd $HOME/theos/sdks
           # Download community-maintained iOS SDK from theos/sdks
-          git clone --depth=1 https://github.com/theos/sdks.git
+          git clone --depth=1 https://github.com/theos/sdks.git $HOME/theos/sdks
           # List available SDKs
-          ls -la sdks/
-          # The Makefile uses 'latest' so Theos will pick the available one
-          # No symlink needed
+          ls $HOME/theos/sdks/iPhoneOS*.sdk
 
       - name: Build UNMHook
         working-directory: ios/UNMHook

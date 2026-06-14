@@ -176,18 +176,37 @@ public class ClassHelper {
             }
 
             Object cookieString = null;
+            if (clazz == null) {
+                XposedBridge.log("[dolby_beta] Cookie.getCookie: Cookie class not found, returning empty cookie");
+                return "";
+            }
             if (versionCode >= 154) {
                 //获取静态cookie方法
-                Method cookieMethod = XposedHelpers.findMethodsByExactParameters(clazz, clazz)[0];
-                Object cookie = XposedHelpers.callStaticMethod(clazz, cookieMethod.getName());
-                for (Method method : XposedHelpers.findMethodsByExactParameters(abstractClazz, String.class)) {
-                    if (method.getTypeParameters().length == 0 && method.getModifiers() == Modifier.PUBLIC) {
-                        cookieString = XposedHelpers.callMethod(cookie, method.getName());
+                try {
+                    Method[] methods = XposedHelpers.findMethodsByExactParameters(clazz, clazz);
+                    if (methods == null || methods.length == 0) return "";
+                    Method cookieMethod = methods[0];
+                    Object cookie = XposedHelpers.callStaticMethod(clazz, cookieMethod.getName());
+                    if (abstractClazz != null) {
+                        for (Method method : XposedHelpers.findMethodsByExactParameters(abstractClazz, String.class)) {
+                            if (method.getTypeParameters().length == 0 && method.getModifiers() == Modifier.PUBLIC) {
+                                cookieString = XposedHelpers.callMethod(cookie, method.getName());
+                            }
+                        }
                     }
+                } catch (Exception e) {
+                    XposedBridge.log("[dolby_beta] Cookie.getCookie exception: " + e.getMessage());
+                    return "";
                 }
             } else {
-                Method cookieMethod = XposedHelpers.findMethodsByExactParameters(clazz, String.class)[0];
-                cookieString = XposedHelpers.callStaticMethod(clazz, cookieMethod.getName());
+                try {
+                    Method[] methods = XposedHelpers.findMethodsByExactParameters(clazz, String.class);
+                    if (methods == null || methods.length == 0) return "";
+                    cookieString = XposedHelpers.callStaticMethod(clazz, methods[0].getName());
+                } catch (Exception e) {
+                    XposedBridge.log("[dolby_beta] Cookie.getCookie exception: " + e.getMessage());
+                    return "";
+                }
             }
 
             return "MUSIC_U=" + cookieString;
@@ -619,7 +638,12 @@ public class ClassHelper {
         public static Method getResultMethod(Context context) {
             if (getResultMethod == null) {
                 try {
-                    List<Method> methodList = Arrays.asList(getClazz(context).getDeclaredMethods());
+                    Class<?> cls = getClazz(context);
+                    if (cls == null) {
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                        return null;
+                    }
+                    List<Method> methodList = Arrays.asList(cls.getDeclaredMethods());
                     getResultMethod = Stream.of(methodList)
                             .filter(m -> m.getExceptionTypes().length == 2)
                             .findFirst()
@@ -771,11 +795,14 @@ public class ClassHelper {
         public static List<Method> getMethodList(Context context) {
             if (methodList == null) {
                 methodList = new ArrayList<>();
-                methodList.addAll(Stream.of(getClazz(context).getDeclaredMethods())
-                        .filter(m -> m.getExceptionTypes().length == 1)
-                        .filter(m -> m.getParameterTypes().length == 5)
-                        .filter(m -> m.getReturnType().getName().contains("Response"))
-                        .toList());
+                Class<?> cls = getClazz(context);
+                if (cls != null) {
+                    methodList.addAll(Stream.of(cls.getDeclaredMethods())
+                            .filter(m -> m.getExceptionTypes().length == 1)
+                            .filter(m -> m.getParameterTypes().length == 5)
+                            .filter(m -> m.getReturnType().getName().contains("Response"))
+                            .toList());
+                }
             }
             return methodList;
         }

@@ -5,6 +5,7 @@ import android.content.Context;
 import com.raincat.dolby_beta.helper.ClassHelper;
 
 import java.lang.reflect.Method;
+import java.util.List;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -24,7 +25,12 @@ public class CdnHook {
     public CdnHook(Context context, int versionCode) {
         if (versionCode < 138)
             return;
-        for (Method m : ClassHelper.HttpInterceptor.getMethodList(context))
+        List<Method> methods = ClassHelper.HttpInterceptor.getMethodList(context);
+        if (methods == null || methods.isEmpty()) {
+            XposedBridge.log("[dolby_beta] CdnHook: interceptor methods not found, skipping");
+            return;
+        }
+        for (Method m : methods)
             XposedBridge.hookMethod(m, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {

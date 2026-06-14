@@ -62,7 +62,8 @@ jobs:
 
       - name: Download iOS SDK
         run: |
-          # Download community-maintained iOS SDK from theos/sdks
+          # Theos may have an empty sdks dir, replace with community SDKs
+          rm -rf $HOME/theos/sdks
           git clone --depth=1 https://github.com/theos/sdks.git $HOME/theos/sdks
           # List available SDKs
           ls $HOME/theos/sdks/iPhoneOS*.sdk

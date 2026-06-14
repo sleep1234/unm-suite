@@ -1,6 +1,5 @@
 export ARCHS = arm64
-export TARGET = iphone:clang:15.0:14.0
-export THEOS_PACKAGE_SCHEME = rootless
+export TARGET = iphone:clang:latest:14.0
 
 INSTALL_TARGET_PROCESSES = NeteaseMusic
 

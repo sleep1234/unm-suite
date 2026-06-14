@@ -25,6 +25,15 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x android/dolby_beta_src/gradlew
 
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/dolby_beta_src/**/*.gradle*', 'android/dolby_beta_src/**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
       - name: Build APK with Gradle
         working-directory: android/dolby_beta_src
         run: ./gradlew app:assembleRelease

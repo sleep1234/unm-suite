@@ -248,8 +248,13 @@ public class ProxyHook {
 
     /**
      * Start the UnblockNeteaseMusic proxy script.
-     * In server proxy mode, we just mark the status and use the remote server.
-     * In local mode, we launch the Node.js script.
+     *
+     * Strategy for v9.5.30+:
+     * - Server proxy mode (proxy_server_key=true): Directly set SCRIPT_STATUS="1" and route
+     *   traffic to the remote UNM server (e.g. NAS). No local libnode.so needed.
+     * - Local mode (proxy_server_key=false): Try launching libnode.so, but if it fails to
+     *   output "HTTP Server running" within 5 seconds, automatically fall back to server
+     *   proxy mode. This handles v9.5.30+ where libnode.so execution silently fails.
      */
     private static void startProxyScript(Context context) {
         ExtraHelper.setExtraDate(ExtraHelper.SCRIPT_STATUS, "0");
@@ -257,9 +262,26 @@ public class ProxyHook {
             XposedBridge.log("[dolby_beta] ProxyHook: proxy_master_key is ON, starting script");
             ScriptHelper.initScript(context, false);
             if (SettingHelper.getInstance().getSetting(SettingHelper.proxy_server_key)) {
+                // Server proxy mode — just mark as running, route traffic to remote server
+                XposedBridge.log("[dolby_beta] ProxyHook: using server proxy mode");
                 ScriptHelper.startHttpProxyMode(context);
             } else {
+                // Local mode — try libnode.so, fallback to server proxy if it fails
+                XposedBridge.log("[dolby_beta] ProxyHook: trying local script mode, will fallback to server proxy if it fails");
                 ScriptHelper.startScript();
+
+                // Schedule a fallback: if local script doesn't set SCRIPT_STATUS="1" within
+                // 5 seconds, switch to server proxy mode automatically.
+                final Context appContext = context.getApplicationContext();
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                    if (ExtraHelper.getExtraDate(ExtraHelper.SCRIPT_STATUS).equals("0")) {
+                        XposedBridge.log("[dolby_beta] ProxyHook: local script failed to start within 5s, falling back to server proxy mode");
+                        ScriptHelper.stopScript();
+                        ScriptHelper.startHttpProxyMode(appContext);
+                    } else {
+                        XposedBridge.log("[dolby_beta] ProxyHook: local script started successfully, no fallback needed");
+                    }
+                }, 5000);
             }
         } else {
             XposedBridge.log("[dolby_beta] ProxyHook: proxy_master_key is OFF, script not started");

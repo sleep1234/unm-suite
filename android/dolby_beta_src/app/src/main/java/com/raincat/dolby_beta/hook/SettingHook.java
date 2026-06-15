@@ -447,7 +447,7 @@ public class SettingHook {
         registerBroadcastReceiver(context);
     }
 
-
+    /**
      * Strategy 2: Traverse from the activity's content root view to find a suitable
      * vertical container (LinearLayout, ScrollView child, RecyclerView, ListView, etc.)
      * and insert a settings row.

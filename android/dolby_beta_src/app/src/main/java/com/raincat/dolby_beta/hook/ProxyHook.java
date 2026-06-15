@@ -165,21 +165,42 @@ public class ProxyHook {
             });
         }
 
-        if (!isPlayProcess)
-            findAndHookMethod("com.netease.cloudmusic.activity.LoadingActivity", context.getClassLoader(), "onCreate", Bundle.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    ExtraHelper.setExtraDate(ExtraHelper.SCRIPT_STATUS, "0");
-                    if (SettingHelper.getInstance().getSetting(SettingHelper.proxy_master_key)) {
-                        ScriptHelper.initScript(context, false);
-                        if (SettingHelper.getInstance().getSetting(SettingHelper.proxy_server_key)) {
-                            ScriptHelper.startHttpProxyMode(context);
-                        } else {
-                            ScriptHelper.startScript();
+        if (!isPlayProcess) {
+            // Script startup hook: find the launch activity and start UNM proxy on its onCreate.
+            // v9.5.30+ removed LoadingActivity — the app now starts directly with MainActivity.
+            // Try LoadingActivity first (old versions), then fall back to MainActivity (v9.x+).
+            boolean hooked = false;
+
+            Class<?> loadingClass = findClassIfExists("com.netease.cloudmusic.activity.LoadingActivity", context.getClassLoader());
+            if (loadingClass != null) {
+                XposedBridge.log("[dolby_beta] ProxyHook: hooking LoadingActivity for script startup");
+                findAndHookMethod(loadingClass, "onCreate", Bundle.class, scriptStartupHook(context));
+                hooked = true;
+            }
+
+            if (!hooked) {
+                Class<?> mainClass = findClassIfExists("com.netease.cloudmusic.activity.MainActivity", context.getClassLoader());
+                if (mainClass != null) {
+                    XposedBridge.log("[dolby_beta] ProxyHook: LoadingActivity not found, hooking MainActivity for script startup (v9.5.30+)");
+                    // Use a flag to ensure script init runs only once per process lifetime,
+                    // since MainActivity.onCreate may be called multiple times.
+                    findAndHookMethod(mainClass, "onCreate", Bundle.class, new XC_MethodHook() {
+                        private boolean scriptStarted = false;
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (scriptStarted) return;
+                            scriptStarted = true;
+                            startProxyScript(context);
                         }
-                    }
+                    });
+                    hooked = true;
                 }
-            });
+            }
+
+            if (!hooked) {
+                XposedBridge.log("[dolby_beta] ProxyHook: neither LoadingActivity nor MainActivity found, script will not auto-start");
+            }
+        }
     }
 
     /**
@@ -208,6 +229,38 @@ public class ProxyHook {
         } else {
             proxyField.set(client, objectProxy);
             sslSocketFactoryField.set(client, objectSSLSocketFactory);
+        }
+    }
+
+    /**
+     * Create an XC_MethodHook that starts the UNM proxy script.
+     */
+    private XC_MethodHook scriptStartupHook(final Context context) {
+        return new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                startProxyScript(context);
+            }
+        };
+    }
+
+    /**
+     * Start the UnblockNeteaseMusic proxy script.
+     * In server proxy mode, we just mark the status and use the remote server.
+     * In local mode, we launch the Node.js script.
+     */
+    private static void startProxyScript(Context context) {
+        ExtraHelper.setExtraDate(ExtraHelper.SCRIPT_STATUS, "0");
+        if (SettingHelper.getInstance().getSetting(SettingHelper.proxy_master_key)) {
+            XposedBridge.log("[dolby_beta] ProxyHook: proxy_master_key is ON, starting script");
+            ScriptHelper.initScript(context, false);
+            if (SettingHelper.getInstance().getSetting(SettingHelper.proxy_server_key)) {
+                ScriptHelper.startHttpProxyMode(context);
+            } else {
+                ScriptHelper.startScript();
+            }
+        } else {
+            XposedBridge.log("[dolby_beta] ProxyHook: proxy_master_key is OFF, script not started");
         }
     }
 }

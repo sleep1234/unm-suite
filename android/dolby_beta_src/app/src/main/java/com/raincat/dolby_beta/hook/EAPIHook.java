@@ -246,7 +246,10 @@ public class EAPIHook {
                     original = original.replace("\"waitTime\":60,", "\"waitTime\":5,");
                     CloudDao.getInstance(context).saveSong(Integer.parseInt(jsonObject.getString("id")), original);
                 } else if (path.contains("cloud/pub/v2")) {
-                    String songid = EAPIHelper.decrypt(getParamsFromUri(uri)).getString("songid");
+                    LinkedHashMap<String, String> paramsMap = getParamsFromUri(uri);
+                    String paramsStr = paramsMap.get("params");
+                    if (paramsStr == null) paramsStr = "";
+                    String songid = EAPIHelper.decrypt(paramsStr).getString("songid");
                     EAPIHelper.uploadCloud(songid);
                     original = CloudDao.getInstance(context).getSong(Integer.parseInt(songid));
                 }
@@ -362,7 +365,7 @@ public class EAPIHook {
      * Legacy hook: for versions before v9.5.30
      */
     private void initLegacy(final Context context) {
-        Method resultMethod = ClassHelper.HttpResponse.getResultMethod(context);
+        Method resultMethod = ClassHelper.OKHttp3Response.getResultMethod(context);
         if (resultMethod == null) {
             XposedBridge.log("[dolby_beta] EAPIHook: core class not found, skipping EAPI hook");
             return;
@@ -379,7 +382,7 @@ public class EAPIHook {
                 if (TextUtils.isEmpty(original)) {
                     return;
                 }
-                ClassHelper.HttpResponse httpResponse = new ClassHelper.HttpResponse(param.thisObject);
+                ClassHelper.OKHttp3Response httpResponse = new ClassHelper.OKHttp3Response(param.thisObject);
                 Object eapi = httpResponse.getEapi(context);
                 Uri uri = ClassHelper.HttpUrl.getUri(context, eapi);
                 if (!uri.getPath().contains("/eapi/"))
@@ -454,7 +457,10 @@ public class EAPIHook {
                     original = original.replace("\"waitTime\":60,", "\"waitTime\":5,");
                     CloudDao.getInstance(context).saveSong(Integer.parseInt(jsonObject.getString("id")), original);
                 } else if (path.contains("cloud/pub/v2")) {
-                    String songid = EAPIHelper.decrypt(ClassHelper.HttpParams.getParams(context, eapi)).getString("songid");
+                    LinkedHashMap<String, String> paramsMap = ClassHelper.HttpParams.getParams(context, eapi);
+                    String paramsStr = paramsMap != null ? paramsMap.get("params") : null;
+                    if (paramsStr == null) paramsStr = "";
+                    String songid = EAPIHelper.decrypt(paramsStr).getString("songid");
                     EAPIHelper.uploadCloud(songid);
                     original = CloudDao.getInstance(context).getSong(Integer.parseInt(songid));
                 }

@@ -305,9 +305,15 @@ public class SettingHook {
             // Find an existing row to copy style from
             View styleRow = findRNSettingsRow(rowListContainer);
             LinearLayout ourRow = createRNSettingsRow(activity, styleRow);
+
+            // CRITICAL: ReactViewGroup.onLayout() is a no-op — RN manages layout through Yoga,
+            // which only knows about RN-managed children. Our inserted view is invisible because
+            // it never gets laid out (position stays at 0,0,0,0).
+            // We must manually measure and layout our row after insertion.
             // Insert at position 0 (before "账号与安全")
             rowListContainer.addView(ourRow, 0);
-            XposedBridge.log("[dolby_beta] SettingHook: RN: settings row inserted at position 0");
+            forceLayoutInRNContainer(ourRow, rowListContainer);
+            XposedBridge.log("[dolby_beta] SettingHook: RN: settings row inserted at position 0 with forced layout");
             return true;
         } catch (Exception e) {
             XposedBridge.log("[dolby_beta] SettingHook: RN insert failed: " + e.getMessage());
@@ -335,6 +341,80 @@ public class SettingHook {
             }
         }
         return false;
+    }
+
+    /**
+     * Force measure and layout on a View inserted into a ReactViewGroup.
+     * ReactViewGroup.onLayout() is a no-op — RN positions children through its Yoga layout
+     * engine, which only knows about RN-managed views. Our inserted view never gets laid out,
+     * so it remains at (0,0,0,0) and is invisible.
+     *
+     * This method:
+     * 1. Measures the row using the container's width
+     * 2. Lays it out at the top of the container (y=0)
+     * 3. Shifts all existing RN rows down by our row's height
+     * 4. Re-applies the shift after each RN layout pass (ViewTreeObserver listener)
+     */
+    private void forceLayoutInRNContainer(View ourRow, ViewGroup container) {
+        // Post to next frame to ensure the view tree is stable
+        ourRow.post(() -> {
+            try {
+                int containerWidth = container.getWidth();
+                if (containerWidth <= 0) containerWidth = container.getMeasuredWidth();
+                if (containerWidth <= 0) containerWidth = 1080; // fallback
+
+                // Measure our row
+                ourRow.measure(
+                    View.MeasureSpec.makeMeasureSpec(containerWidth, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                );
+                int rowHeight = ourRow.getMeasuredHeight();
+                XposedBridge.log("[dolby_beta] SettingHook: forceLayout: containerWidth=" + containerWidth + " rowHeight=" + rowHeight);
+
+                if (rowHeight <= 0) {
+                    XposedBridge.log("[dolby_beta] SettingHook: forceLayout: row has 0 height, something wrong");
+                    return;
+                }
+
+                // Layout our row at the very top of the container
+                ourRow.layout(0, 0, containerWidth, rowHeight);
+
+                // Shift all existing RN-managed rows down by our row's height
+                // RN uses absolute positioning via Yoga, so we need to offset them
+                for (int i = 0; i < container.getChildCount(); i++) {
+                    View child = container.getChildAt(i);
+                    if (child != ourRow) {
+                        child.offsetTopAndBottom(rowHeight);
+                    }
+                }
+
+                XposedBridge.log("[dolby_beta] SettingHook: forceLayout: row laid out at (0,0," + containerWidth + "," + rowHeight + "), shifted " + (container.getChildCount() - 1) + " siblings down");
+
+                // Register a layout listener to re-apply the shift after RN re-layouts
+                // (RN's NativeViewHierarchyManager may reset positions on the next layout pass)
+                container.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+                    try {
+                        // Re-shift if needed (RN may have reset positions)
+                        int currentTop = ourRow.getTop();
+                        if (currentTop != 0) {
+                            ourRow.offsetTopAndBottom(-currentTop); // reset our row to top
+                        }
+                        // Check if siblings need re-shifting
+                        for (int i = 0; i < container.getChildCount(); i++) {
+                            View child = container.getChildAt(i);
+                            if (child != ourRow && child.getTop() < rowHeight) {
+                                child.offsetTopAndBottom(rowHeight - child.getTop());
+                            }
+                        }
+                    } catch (Exception e) {
+                        XposedBridge.log("[dolby_beta] SettingHook: globalLayout re-shift failed: " + e.getMessage());
+                    }
+                });
+
+            } catch (Exception e) {
+                XposedBridge.log("[dolby_beta] SettingHook: forceLayout failed: " + e.getMessage());
+            }
+        });
     }
 
     /**
@@ -441,6 +521,10 @@ public class SettingHook {
         outerWrapper.setTag(SETTINGS_ROW_TAG);
         outerWrapper.setOrientation(LinearLayout.VERTICAL);
 
+        // Explicit LayoutParams so ReactViewGroup can measure us (MATCH_PARENT width)
+        outerWrapper.setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         // Match RN row dimensions: each row is about 150dp tall, full width with 50dp horizontal padding
         int padH = Tools.dp2px(context, 50);
         int padV = Tools.dp2px(context, 20);
@@ -461,6 +545,12 @@ public class SettingHook {
                     outerWrapper.setBackground(bg.getConstantState() != null ? bg.getConstantState().newDrawable() : bg);
                 }
             }
+        }
+
+        // DEBUG: set a semi-transparent red background so the row is visible even if text color is wrong
+        // TODO: remove this after confirming the row appears
+        if (outerWrapper.getBackground() == null) {
+            outerWrapper.setBackgroundColor(0x40FF0000); // semi-transparent red
         }
 
         // Reuse the style from the native path if RN style didn't yield results

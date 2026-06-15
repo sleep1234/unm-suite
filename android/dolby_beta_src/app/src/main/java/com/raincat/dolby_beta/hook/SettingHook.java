@@ -547,11 +547,7 @@ public class SettingHook {
             }
         }
 
-        // DEBUG: set a semi-transparent red background so the row is visible even if text color is wrong
-        // TODO: remove this after confirming the row appears
-        if (outerWrapper.getBackground() == null) {
-            outerWrapper.setBackgroundColor(0x40FF0000); // semi-transparent red
-        }
+        // If no background was copied from existing row, leave transparent (text is visible on any background)
 
         // Reuse the style from the native path if RN style didn't yield results
         // Title text

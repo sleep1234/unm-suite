@@ -46,6 +46,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Create Release and Upload APK
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK_PATH=$(find android/dolby_beta_src/app/build/outputs/apk/release/ -name "*.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "No APK found"
+            exit 0
+          fi
+          APK_NAME=$(basename "$APK_PATH")
+          DATE_TAG="v$(date +%Y%m%d-%H%M%S)"
+          echo "Creating release ${DATE_TAG} with ${APK_NAME}"
+          gh release create "${DATE_TAG}" "$APK_PATH" \
+            --title "Dolby Beta ${DATE_TAG}" \
+            --notes "Automated build from commit ${{ github.sha }}" \
+            --prerelease
+
   build-ios:
     name: iOS Tweak (Theos)
     runs-on: macos-latest

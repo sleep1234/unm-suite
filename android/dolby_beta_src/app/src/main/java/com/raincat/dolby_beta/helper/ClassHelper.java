@@ -1199,20 +1199,5 @@ public class ClassHelper {
             }
             return methodList;
         }
-                    if (filtered.isEmpty()) {
-                        // Strategy 3: try interceptor's intercept-like methods
-                        XposedBridge.log("[dolby_beta] HttpInterceptor.getMethodList: trying intercept method pattern");
-                        filtered = Stream.of(cls.getDeclaredMethods())
-                                .filter(m -> m.getReturnType().getName().contains("Response") || m.getReturnType() == Object.class)
-                                .filter(m -> m.getParameterTypes().length >= 1)
-                                .filter(m -> m.getExceptionTypes().length >= 1)
-                                .toList();
-                    }
-                    methodList.addAll(filtered);
-                    XposedBridge.log("[dolby_beta] HttpInterceptor.getMethodList: found " + methodList.size() + " methods");
-                }
-            }
-            return methodList;
-        }
     }
 }

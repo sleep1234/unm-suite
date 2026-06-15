@@ -59,8 +59,6 @@ import com.raincat.dolby_beta.view.setting.UpdateView;
 import com.raincat.dolby_beta.view.setting.ListenView;
 import com.raincat.dolby_beta.view.setting.WarnView;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -82,8 +80,8 @@ import static de.robv.android.xposed.XposedHelpers.findClassIfExists;
  * </pre>
  */
 public class SettingHook {
-    private String SettingActivity;
-    private String switchViewName = "";
+    private String settingActivityName;
+    private String rnActivityName = "com.netease.cloudmusic.music.biz.rn.activity.MainProcessRNActivity";
     private TextView titleView, subView;
     private LinearLayout dialogRoot, dialogProxyRoot, dialogBeautyRoot, dialogSidebarRoot;
 
@@ -93,48 +91,40 @@ public class SettingHook {
     private static final String SETTINGS_ROW_TAG = "dolby_beta_settings_row";
 
     public SettingHook(Context context, int versionCode) {
-        //一切的前提，没这个页面连设置都进不去
+        // Determine the legacy native SettingActivity class name
         if (versionCode >= 8007000) {
-            SettingActivity = "com.netease.cloudmusic.music.biz.setting.activity.SettingActivity";
+            settingActivityName = "com.netease.cloudmusic.music.biz.setting.activity.SettingActivity";
         } else {
-            SettingActivity = "com.netease.cloudmusic.activity.SettingActivity";
+            settingActivityName = "com.netease.cloudmusic.activity.SettingActivity";
         }
-        Class<?> settingActivityClass = findClassIfExists(SettingActivity, context.getClassLoader());
-        if (settingActivityClass == null) {
-            XposedBridge.log("[dolby_beta] SettingHook: SettingActivity class not found!");
-            return;
-        }
-        Field[] allFields = settingActivityClass.getDeclaredFields();
-        XposedBridge.log("[dolby_beta] SettingHook: SettingActivity has " + allFields.length + " fields");
 
-        // Find a Switch-like view field for anchoring our settings UI
-        String[] switchPatterns = {"Switch", "switch", "CompoundButton", "compoundbutton", "Toggle", "toggle"};
-        for (Field field : allFields) {
-            String typeName = field.getType().getName();
-            for (String pattern : switchPatterns) {
-                if (typeName.contains(pattern)) {
-                    switchViewName = field.getName();
-                    break;
-                }
-            }
-            if (!switchViewName.isEmpty()) break;
+        // Hook 1: The RN-based settings page (MainProcessRNActivity) — this is the one users
+        // actually see when entering Settings from the sidebar in v9.5.30+.
+        Class<?> rnActivityClass = findClassIfExists(rnActivityName, context.getClassLoader());
+        if (rnActivityClass != null) {
+            XposedBridge.log("[dolby_beta] SettingHook: hooking RN activity: " + rnActivityName);
+            hookActivity(rnActivityClass);
+        } else {
+            XposedBridge.log("[dolby_beta] SettingHook: RN activity not found: " + rnActivityName);
         }
-        // If no Switch-like field found, try any View field as anchor
-        if (switchViewName.isEmpty()) {
-            XposedBridge.log("[dolby_beta] SettingHook: no Switch field found, trying View field");
-            for (Field field : allFields) {
-                if (field.getType().getName().contains("View") && !Modifier.isStatic(field.getModifiers())) {
-                    switchViewName = field.getName();
-                    XposedBridge.log("[dolby_beta] SettingHook: using View field as anchor: " + switchViewName);
-                    break;
-                }
-            }
-        }
-        XposedBridge.log("[dolby_beta] SettingHook: anchor field = " + switchViewName);
 
-        // Hook onResume — every time the settings page is shown, ensure our row is present.
-        // We no longer use a viewInitialized guard; instead we check by tag whether the row already exists.
-        findAndHookMethod(settingActivityClass, "onResume", new XC_MethodHook() {
+        // Hook 2: The legacy native SettingActivity — still exists but users rarely enter it directly.
+        Class<?> settingActivityClass = findClassIfExists(settingActivityName, context.getClassLoader());
+        if (settingActivityClass != null) {
+            XposedBridge.log("[dolby_beta] SettingHook: hooking native activity: " + settingActivityName);
+            hookActivity(settingActivityClass);
+        } else {
+            XposedBridge.log("[dolby_beta] SettingHook: native SettingActivity not found: " + settingActivityName);
+        }
+    }
+
+    /**
+     * Hook onResume and onDestroy for the given Activity class.
+     * On resume: ensure our settings row is present in the view hierarchy.
+     * On destroy: clean up broadcast receiver.
+     */
+    private void hookActivity(Class<?> activityClass) {
+        findAndHookMethod(activityClass, "onResume", new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 super.afterHookedMethod(param);
@@ -143,7 +133,7 @@ public class SettingHook {
             }
         });
 
-        findAndHookMethod(settingActivityClass, "onDestroy", new XC_MethodHook() {
+        findAndHookMethod(activityClass, "onDestroy", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                 super.beforeHookedMethod(param);
@@ -182,20 +172,12 @@ public class SettingHook {
             // Register broadcast first
             registerBroadcastReceiverOnce(activity);
 
-            // Strategy 1: Try the anchor field approach
-            if (!switchViewName.isEmpty()) {
-                Object fieldObj = XposedHelpers.getObjectField(activity, switchViewName);
-                XposedBridge.log("[dolby_beta] SettingHook: field '" + switchViewName + "' = " + fieldObj);
-                if (fieldObj instanceof View) {
-                    View switchView = (View) fieldObj;
-                    if (tryInsertViaAnchor(activity, switchView)) {
-                        return;
-                    }
-                }
+            // Try to find and insert into the RN settings page layout
+            if (tryInsertIntoRNSettings(activity)) {
+                return;
             }
 
-            // Strategy 2: Traverse from content root to find a suitable container
-            XposedBridge.log("[dolby_beta] SettingHook: anchor field approach failed, trying content root traversal");
+            // Fallback: try the native settings page approach
             if (tryInsertViaContentRoot(activity)) {
                 return;
             }
@@ -208,6 +190,256 @@ public class SettingHook {
     }
 
     /**
+     * Strategy for RN settings page (MainProcessRNActivity):
+     * The RN layout is: contentContainer → musicContainer → RN root → ... →
+     * FrameLayout[scrollable] → ViewGroup (list of setting rows) → ViewGroup rows
+     * We need to find the scrollable FrameLayout's first child ViewGroup (the list container)
+     * and insert our row before the first existing row.
+     *
+     * IMPORTANT: MainProcessRNActivity is a generic RN container used for many pages.
+     * We must verify this is actually the Settings page by checking for "设置" title text.
+     */
+    private boolean tryInsertIntoRNSettings(Activity activity) {
+        try {
+            View contentView = activity.findViewById(android.R.id.content);
+            if (contentView == null) return false;
+
+            // First, verify this is the Settings page by finding a "设置" TextView
+            if (!findTextInView(contentView, "设置")) {
+                XposedBridge.log("[dolby_beta] SettingHook: RN: not a settings page (no '设置' title found)");
+                return false;
+            }
+
+            // Find the scrollable FrameLayout inside the RN view tree
+            ViewGroup scrollContainer = findScrollableFrameLayout(contentView);
+            if (scrollContainer == null) {
+                XposedBridge.log("[dolby_beta] SettingHook: RN: no scrollable FrameLayout found");
+                return false;
+            }
+
+            // The scrollable FrameLayout's first child should be the ViewGroup that
+            // contains all the setting rows
+            if (scrollContainer.getChildCount() == 0) {
+                XposedBridge.log("[dolby_beta] SettingHook: RN: scrollable container has no children");
+                return false;
+            }
+
+            View listChild = scrollContainer.getChildAt(0);
+            if (!(listChild instanceof ViewGroup)) {
+                XposedBridge.log("[dolby_beta] SettingHook: RN: scrollable child is not a ViewGroup: " + listChild.getClass().getName());
+                return false;
+            }
+
+            ViewGroup rowListContainer = (ViewGroup) listChild;
+            XposedBridge.log("[dolby_beta] SettingHook: RN: found row list container: " + rowListContainer.getClass().getName() + ", children = " + rowListContainer.getChildCount());
+
+            // Find an existing row to copy style from
+            View styleRow = findRNSettingsRow(rowListContainer);
+            LinearLayout ourRow = createRNSettingsRow(activity, styleRow);
+            // Insert at position 0 (before "账号与安全")
+            rowListContainer.addView(ourRow, 0);
+            XposedBridge.log("[dolby_beta] SettingHook: RN: settings row inserted at position 0");
+            return true;
+        } catch (Exception e) {
+            XposedBridge.log("[dolby_beta] SettingHook: RN insert failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Check if a specific text string exists in the view hierarchy.
+     * Limited depth to avoid performance issues when scanning large RN view trees.
+     */
+    private boolean findTextInView(View root, String target) {
+        return findTextInViewInternal(root, target, 0, 8);
+    }
+
+    private boolean findTextInViewInternal(View root, String target, int depth, int maxDepth) {
+        if (depth > maxDepth) return false;
+        if (root instanceof TextView) {
+            CharSequence text = ((TextView) root).getText();
+            if (text != null && text.toString().equals(target)) return true;
+        }
+        if (root instanceof ViewGroup) {
+            for (int i = 0; i < ((ViewGroup) root).getChildCount(); i++) {
+                if (findTextInViewInternal(((ViewGroup) root).getChildAt(i), target, depth + 1, maxDepth)) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Find the first scrollable FrameLayout in the view hierarchy.
+     * In RN settings, this is the main scroll container (a FrameLayout that acts as ScrollView).
+     * We identify it by: FrameLayout instance + isScrollContainer() == true + has children with setting rows.
+     */
+    private ViewGroup findScrollableFrameLayout(View root) {
+        if (!(root instanceof ViewGroup)) return null;
+        ViewGroup group = (ViewGroup) root;
+
+        // Check if this is a scrollable FrameLayout (the RN scroll container)
+        // isScrollContainer() returns true for views that can scroll their content
+        if (group instanceof android.widget.FrameLayout) {
+            // Check if this looks like the RN scroll container by verifying:
+            // 1. It's scrollable
+            // 2. It has a child ViewGroup that contains multiple rows with TextViews
+            if (group.isScrollContainer() && group.getChildCount() > 0) {
+                View firstChild = group.getChildAt(0);
+                if (firstChild instanceof ViewGroup) {
+                    ViewGroup childGroup = (ViewGroup) firstChild;
+                    // Check if it has multiple children that look like setting rows
+                    int rowLikeCount = 0;
+                    for (int i = 0; i < childGroup.getChildCount(); i++) {
+                        View row = childGroup.getChildAt(i);
+                        if (row instanceof ViewGroup && hasTextView((ViewGroup) row)) {
+                            rowLikeCount++;
+                        }
+                    }
+                    if (rowLikeCount >= 5) {
+                        XposedBridge.log("[dolby_beta] SettingHook: RN: found scrollable FrameLayout with " + rowLikeCount + " row-like children");
+                        return group;
+                    }
+                }
+            }
+        }
+
+        // Recursively search children
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            ViewGroup result = findScrollableFrameLayout(child);
+            if (result != null) return result;
+        }
+
+        return null;
+    }
+
+    /**
+     * Find the first ViewGroup child that looks like an RN settings row
+     * (has a clickable child that contains a TextView).
+     */
+    private View findRNSettingsRow(ViewGroup container) {
+        for (int i = 0; i < container.getChildCount(); i++) {
+            View child = container.getChildAt(i);
+            if (child instanceof ViewGroup) {
+                // Check if this row contains a clickable ViewGroup with a TextView
+                if (hasClickableWithText((ViewGroup) child)) {
+                    return child;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Check if a ViewGroup has a clickable child that contains a TextView.
+     */
+    private boolean hasClickableWithText(ViewGroup group) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child.isClickable() && child instanceof ViewGroup) {
+                if (hasTextView((ViewGroup) child)) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Check if a ViewGroup contains a TextView with non-empty text.
+     */
+    private boolean hasTextView(ViewGroup group) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child instanceof TextView && !((TextView) child).getText().toString().isEmpty()) {
+                return true;
+            }
+            if (child instanceof ViewGroup && hasTextView((ViewGroup) child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Create a settings row that mimics the RN settings page style.
+     * RN rows are: ViewGroup(padding=0, horizontal) → ViewGroup[clickable] →
+     *   ViewGroup(padding) → [TextView(title) + optional ImageView(arrow)]
+     *
+     * We create a native LinearLayout with vertical orientation that looks similar:
+     * title text on top, subtitle below, matching the RN row dimensions.
+     */
+    private LinearLayout createRNSettingsRow(Context context, View styleRow) {
+        LinearLayout outerWrapper = new LinearLayout(context);
+        outerWrapper.setTag(SETTINGS_ROW_TAG);
+        outerWrapper.setOrientation(LinearLayout.VERTICAL);
+
+        // Match RN row dimensions: each row is about 150dp tall, full width with 50dp horizontal padding
+        int padH = Tools.dp2px(context, 50);
+        int padV = Tools.dp2px(context, 20);
+        outerWrapper.setPadding(padH, padV, padH, padV);
+
+        // Try to copy text style from existing RN row
+        float existingTextSize = 0;
+        int existingTextColor = 0;
+        if (styleRow instanceof ViewGroup) {
+            TextView existingTv = findFirstTextView((ViewGroup) styleRow);
+            if (existingTv != null) {
+                existingTextSize = existingTv.getTextSize();
+                existingTextColor = existingTv.getCurrentTextColor();
+                // Copy background from the clickable inner ViewGroup
+                View clickableChild = findClickableChild((ViewGroup) styleRow);
+                if (clickableChild != null && clickableChild.getBackground() != null) {
+                    Drawable bg = clickableChild.getBackground();
+                    outerWrapper.setBackground(bg.getConstantState() != null ? bg.getConstantState().newDrawable() : bg);
+                }
+            }
+        }
+
+        // Reuse the style from the native path if RN style didn't yield results
+        // Title text
+        titleView = new TextView(context);
+        if (existingTextSize > 0) {
+            titleView.setTextSize(TypedValue.COMPLEX_UNIT_PX, existingTextSize);
+            titleView.setTextColor(existingTextColor);
+        } else {
+            titleView.setTextSize(16);
+        }
+        outerWrapper.addView(titleView);
+
+        // Subtitle text
+        subView = new TextView(context);
+        if (existingTextSize > 0) {
+            subView.setTextSize(TypedValue.COMPLEX_UNIT_PX, existingTextSize * 0.8f);
+            subView.setTextColor(existingTextColor);
+        } else {
+            subView.setTextSize(12);
+        }
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        subLp.topMargin = Tools.dp2px(context, 4);
+        subView.setLayoutParams(subLp);
+        outerWrapper.addView(subView);
+
+        refresh();
+        outerWrapper.setOnClickListener(view -> showSettingDialog(context));
+        return outerWrapper;
+    }
+
+    /**
+     * Find the first clickable child in a ViewGroup (for extracting RN row background).
+     */
+    private View findClickableChild(ViewGroup group) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child.isClickable()) return child;
+            if (child instanceof ViewGroup) {
+                View result = findClickableChild((ViewGroup) child);
+                if (result != null) return result;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Register broadcast receiver only once per Activity lifecycle.
      */
     private void registerBroadcastReceiverOnce(Context context) {
@@ -215,40 +447,7 @@ public class SettingHook {
         registerBroadcastReceiver(context);
     }
 
-    /**
-     * Strategy 1: Insert settings row via a known anchor View (e.g., SwitchCompat field)
-     * Gets the anchor's parent and grandparent, inserts a new row alongside existing settings rows.
-     */
-    private boolean tryInsertViaAnchor(Context context, View anchorView) {
-        try {
-            ViewGroup parent = (ViewGroup) anchorView.getParent();
-            if (parent == null) {
-                XposedBridge.log("[dolby_beta] SettingHook: anchor view has no parent");
-                return false;
-            }
-            XposedBridge.log("[dolby_beta] SettingHook: parent = " + parent.getClass().getName());
 
-            ViewGroup grandparent = (ViewGroup) parent.getParent();
-            if (grandparent == null) {
-                XposedBridge.log("[dolby_beta] SettingHook: parent has no parent");
-                return false;
-            }
-            XposedBridge.log("[dolby_beta] SettingHook: grandparent = " + grandparent.getClass().getName() + ", children = " + grandparent.getChildCount());
-
-            LinearLayout linearLayout = createSettingsRow(context, parent);
-            grandparent.addView(linearLayout, 0);
-            XposedBridge.log("[dolby_beta] SettingHook: settings row inserted via anchor at position 0");
-            return true;
-        } catch (ClassCastException e) {
-            XposedBridge.log("[dolby_beta] SettingHook: anchor approach ClassCastException: " + e.getMessage());
-            return false;
-        } catch (Exception e) {
-            XposedBridge.log("[dolby_beta] SettingHook: anchor approach failed: " + e.getMessage());
-            return false;
-        }
-    }
-
-    /**
      * Strategy 2: Traverse from the activity's content root view to find a suitable
      * vertical container (LinearLayout, ScrollView child, RecyclerView, ListView, etc.)
      * and insert a settings row.

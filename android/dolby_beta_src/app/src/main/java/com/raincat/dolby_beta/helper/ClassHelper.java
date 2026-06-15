@@ -555,6 +555,7 @@ public class ClassHelper {
 
     public static class OKHttp3Response {
         private static Class<?> clazz;
+        private static Method getResultMethod;
 
         final Object okHttp3Response;
 
@@ -709,7 +710,7 @@ public class ClassHelper {
             }
             if (dataField == null) throw new NullPointerException("getResponseObject: no suitable field found");
             dataField.setAccessible(true);
-            return dataField.get(httpResponse);
+            return dataField.get(okHttp3Response);
         }
 
         public Object getEapi(Context context) throws IllegalAccessException, NullPointerException {
@@ -740,7 +741,7 @@ public class ClassHelper {
             }
             if (dataField == null) throw new NullPointerException("getEapi: no suitable field found");
             dataField.setAccessible(true);
-            return dataField.get(httpResponse);
+            return dataField.get(okHttp3Response);
         }
 
         public static Method getResultMethod(Context context) {

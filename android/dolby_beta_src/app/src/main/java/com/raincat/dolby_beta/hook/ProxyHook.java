@@ -166,39 +166,41 @@ public class ProxyHook {
         }
 
         if (!isPlayProcess) {
-            // Script startup hook: find the launch activity and start UNM proxy on its onCreate.
-            // v9.5.30+ removed LoadingActivity — the app now starts directly with MainActivity.
-            // Try LoadingActivity first (old versions), then fall back to MainActivity (v9.x+).
+            // Script startup hook: start UNM proxy when the app launches.
+            // IMPORTANT: In v9.5.30+, LoadingActivity still exists as a class in the DEX but is
+            // NOT registered in AndroidManifest, so its onCreate is never called by the system.
+            // We must try MainActivity FIRST (the actual launcher activity), and only fall back
+            // to LoadingActivity for very old versions where it was still the entry point.
             boolean hooked = false;
 
-            Class<?> loadingClass = findClassIfExists("com.netease.cloudmusic.activity.LoadingActivity", context.getClassLoader());
-            if (loadingClass != null) {
-                XposedBridge.log("[dolby_beta] ProxyHook: hooking LoadingActivity for script startup");
-                findAndHookMethod(loadingClass, "onCreate", Bundle.class, scriptStartupHook(context));
+            Class<?> mainClass = findClassIfExists("com.netease.cloudmusic.activity.MainActivity", context.getClassLoader());
+            if (mainClass != null) {
+                XposedBridge.log("[dolby_beta] ProxyHook: hooking MainActivity for script startup");
+                // Use a flag to ensure script init runs only once per process lifetime,
+                // since MainActivity.onCreate may be called multiple times (e.g. task restore).
+                findAndHookMethod(mainClass, "onCreate", Bundle.class, new XC_MethodHook() {
+                    private boolean scriptStarted = false;
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (scriptStarted) return;
+                        scriptStarted = true;
+                        startProxyScript(context);
+                    }
+                });
                 hooked = true;
             }
 
             if (!hooked) {
-                Class<?> mainClass = findClassIfExists("com.netease.cloudmusic.activity.MainActivity", context.getClassLoader());
-                if (mainClass != null) {
-                    XposedBridge.log("[dolby_beta] ProxyHook: LoadingActivity not found, hooking MainActivity for script startup (v9.5.30+)");
-                    // Use a flag to ensure script init runs only once per process lifetime,
-                    // since MainActivity.onCreate may be called multiple times.
-                    findAndHookMethod(mainClass, "onCreate", Bundle.class, new XC_MethodHook() {
-                        private boolean scriptStarted = false;
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            if (scriptStarted) return;
-                            scriptStarted = true;
-                            startProxyScript(context);
-                        }
-                    });
+                Class<?> loadingClass = findClassIfExists("com.netease.cloudmusic.activity.LoadingActivity", context.getClassLoader());
+                if (loadingClass != null) {
+                    XposedBridge.log("[dolby_beta] ProxyHook: MainActivity not found, hooking LoadingActivity for script startup (old version)");
+                    findAndHookMethod(loadingClass, "onCreate", Bundle.class, scriptStartupHook(context));
                     hooked = true;
                 }
             }
 
             if (!hooked) {
-                XposedBridge.log("[dolby_beta] ProxyHook: neither LoadingActivity nor MainActivity found, script will not auto-start");
+                XposedBridge.log("[dolby_beta] ProxyHook: neither MainActivity nor LoadingActivity found, script will not auto-start");
             }
         }
     }

@@ -1,13 +1,13 @@
 package com.raincat.dolby_beta.hook;
 
 import android.annotation.SuppressLint;
+import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -87,6 +87,7 @@ public class SettingHook {
     private LinearLayout dialogRoot, dialogProxyRoot, dialogBeautyRoot, dialogSidebarRoot;
 
     private BroadcastReceiver broadcastReceiver;
+    private boolean viewInitialized = false;
 
     public SettingHook(Context context,int versionCode) {
         //一切的前提，没这个页面连设置都进不去
@@ -98,7 +99,12 @@ public class SettingHook {
             SettingActivity="com.netease.cloudmusic.activity.SettingActivity";
         }
         Class<?> settingActivityClass = findClassIfExists(SettingActivity, context.getClassLoader());
+        if (settingActivityClass == null) {
+            XposedBridge.log("[dolby_beta] SettingHook: SettingActivity class not found!");
+            return;
+        }
         Field[] allFields = settingActivityClass.getDeclaredFields();
+        XposedBridge.log("[dolby_beta] SettingHook: SettingActivity has " + allFields.length + " fields");
         // Find a Switch-like view field for anchoring our settings UI
         // Try multiple type name patterns: Switch, SwitchCompat, MaterialSwitch, CompoundButton
         String[] switchPatterns = {"Switch", "switch", "CompoundButton", "compoundbutton", "Toggle", "toggle"};
@@ -123,14 +129,14 @@ public class SettingHook {
                 }
             }
         }
-        if (switchViewName.isEmpty()) {
-            XposedBridge.log("[dolby_beta] SettingHook: no suitable anchor field found, settings UI may not appear");
-        }
+        XposedBridge.log("[dolby_beta] SettingHook: anchor field = " + switchViewName);
 
-        findAndHookMethod(settingActivityClass, "onCreate", Bundle.class, new XC_MethodHook() {
+        // Hook onResume instead of onCreate - views are guaranteed to be initialized by then
+        findAndHookMethod(settingActivityClass, "onResume", new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 super.afterHookedMethod(param);
+                if (viewInitialized) return;
                 Context c = (Context) param.thisObject;
                 //注册广播
                 registerBroadcastReceiver(c);
@@ -143,6 +149,7 @@ public class SettingHook {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                 super.beforeHookedMethod(param);
+                viewInitialized = false;
                 if (broadcastReceiver != null)
                     ((Context) param.thisObject).unregisterReceiver(broadcastReceiver);
             }
@@ -150,59 +157,200 @@ public class SettingHook {
     }
 
     private void initView(final Context context) {
-        if (switchViewName.isEmpty()) {
-            XposedBridge.log("[dolby_beta] SettingHook: no anchor field, skipping initView");
-            return;
-        }
         try {
-        TextView originalText = null;
-        //获取开关控件
-        View switchCompat = (View) XposedHelpers.getObjectField(context, switchViewName);
-        //获取开关控件爸爸
-        ViewGroup parent = (ViewGroup) switchCompat.getParent();
-        //获取开关控件爷爷
-        ViewGroup grandparent = (ViewGroup) parent.getParent();
+            // Strategy 1: Try the SwitchCompat field approach
+            if (!switchViewName.isEmpty()) {
+                Object fieldObj = XposedHelpers.getObjectField(context, switchViewName);
+                XposedBridge.log("[dolby_beta] SettingHook: field '" + switchViewName + "' = " + fieldObj);
+                if (fieldObj instanceof View) {
+                    View switchView = (View) fieldObj;
+                    if (tryInsertViaAnchor(context, switchView)) {
+                        viewInitialized = true;
+                        return;
+                    }
+                }
+            }
 
+            // Strategy 2: Traverse from content root to find a suitable container
+            XposedBridge.log("[dolby_beta] SettingHook: anchor field approach failed, trying content root traversal");
+            if (tryInsertViaContentRoot(context)) {
+                viewInitialized = true;
+                return;
+            }
+
+            XposedBridge.log("[dolby_beta] SettingHook: all strategies failed, settings UI will not appear");
+        } catch (Exception e) {
+            XposedBridge.log("[dolby_beta] SettingHook: initView failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Strategy 1: Insert settings row via a known anchor View (e.g., SwitchCompat field)
+     * Gets the anchor's parent and grandparent, inserts a new row alongside existing settings rows.
+     */
+    private boolean tryInsertViaAnchor(Context context, View anchorView) {
+        try {
+            ViewGroup parent = (ViewGroup) anchorView.getParent();
+            if (parent == null) {
+                XposedBridge.log("[dolby_beta] SettingHook: anchor view has no parent");
+                return false;
+            }
+            XposedBridge.log("[dolby_beta] SettingHook: parent = " + parent.getClass().getName());
+
+            ViewGroup grandparent = (ViewGroup) parent.getParent();
+            if (grandparent == null) {
+                XposedBridge.log("[dolby_beta] SettingHook: parent has no parent");
+                return false;
+            }
+            XposedBridge.log("[dolby_beta] SettingHook: grandparent = " + grandparent.getClass().getName() + ", children = " + grandparent.getChildCount());
+
+            LinearLayout linearLayout = createSettingsRow(context, parent);
+            grandparent.addView(linearLayout, 0);
+            XposedBridge.log("[dolby_beta] SettingHook: settings row inserted via anchor at position 0");
+            return true;
+        } catch (ClassCastException e) {
+            XposedBridge.log("[dolby_beta] SettingHook: anchor approach ClassCastException: " + e.getMessage());
+            return false;
+        } catch (Exception e) {
+            XposedBridge.log("[dolby_beta] SettingHook: anchor approach failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Strategy 2: Traverse from the activity's content root view to find a suitable
+     * vertical container (LinearLayout, ScrollView child, RecyclerView, ListView, etc.)
+     * and insert a settings row.
+     */
+    private boolean tryInsertViaContentRoot(Context context) {
+        try {
+            Activity activity = (Activity) context;
+            View contentView = activity.findViewById(android.R.id.content);
+            if (contentView == null) {
+                XposedBridge.log("[dolby_beta] SettingHook: android.R.id.content not found");
+                return false;
+            }
+            XposedBridge.log("[dolby_beta] SettingHook: content root = " + contentView.getClass().getName());
+
+            // Find a deep vertical container by traversing the view tree
+            ViewGroup targetContainer = findVerticalContainer(contentView);
+            if (targetContainer == null) {
+                XposedBridge.log("[dolby_beta] SettingHook: no suitable vertical container found");
+                return false;
+            }
+            XposedBridge.log("[dolby_beta] SettingHook: found container = " + targetContainer.getClass().getName() + ", children = " + targetContainer.getChildCount());
+
+            // Create a styled row matching the existing settings rows
+            // Try to find an existing row to copy style from
+            TextView styleSource = findFirstTextView(targetContainer);
+            LinearLayout linearLayout = createSettingsRow(context, styleSource);
+            targetContainer.addView(linearLayout, 0);
+            XposedBridge.log("[dolby_beta] SettingHook: settings row inserted via content root at position 0");
+            return true;
+        } catch (Exception e) {
+            XposedBridge.log("[dolby_beta] SettingHook: content root approach failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Find a suitable vertical container in the view hierarchy.
+     * We look for a ViewGroup that has multiple children and is likely a settings list.
+     */
+    private ViewGroup findVerticalContainer(View root) {
+        if (!(root instanceof ViewGroup)) return null;
+        ViewGroup group = (ViewGroup) root;
+
+        // If this is a vertical LinearLayout or ScrollView with multiple children, it's likely our target
+        if (group.getChildCount() >= 2) {
+            if (group instanceof LinearLayout && ((LinearLayout) group).getOrientation() == LinearLayout.VERTICAL) {
+                return group;
+            }
+            // ScrollView's single child is often the settings list
+            if (group instanceof ScrollView && group.getChildCount() > 0) {
+                View child = group.getChildAt(0);
+                if (child instanceof ViewGroup) {
+                    return (ViewGroup) child;
+                }
+            }
+            // RecyclerView or ListView
+            String className = group.getClass().getName();
+            if (className.contains("RecyclerView") || className.contains("ListView") || className.contains("Recycler")) {
+                return group;
+            }
+        }
+
+        // Recursively search children, prioritizing deeper containers
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            ViewGroup result = findVerticalContainer(child);
+            if (result != null) return result;
+        }
+        return null;
+    }
+
+    /**
+     * Find the first TextView in the view hierarchy to copy text style from.
+     */
+    private TextView findFirstTextView(ViewGroup root) {
+        for (int i = 0; i < root.getChildCount(); i++) {
+            View child = root.getChildAt(i);
+            if (child instanceof TextView) return (TextView) child;
+            if (child instanceof ViewGroup) {
+                TextView result = findFirstTextView((ViewGroup) child);
+                if (result != null) return result;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Create the settings row LinearLayout with title and subtitle.
+     */
+    private LinearLayout createSettingsRow(Context context, ViewGroup styleParent) {
         LinearLayout linearLayout = new LinearLayout(context);
-        ViewGroup.LayoutParams layoutParams = parent.getLayoutParams();
-        linearLayout.setLayoutParams(layoutParams);
-        linearLayout.setBackground(parent.getBackground());
+        if (styleParent != null) {
+            ViewGroup.LayoutParams layoutParams = styleParent.getLayoutParams();
+            if (layoutParams != null) linearLayout.setLayoutParams(layoutParams);
+            linearLayout.setBackground(styleParent.getBackground());
+        }
         linearLayout.setGravity(Gravity.CENTER_VERTICAL);
         linearLayout.setOrientation(LinearLayout.HORIZONTAL);
-        grandparent.addView(linearLayout, 0);
 
         titleView = new TextView(context);
         linearLayout.addView(titleView);
         subView = new TextView(context);
         linearLayout.addView(subView);
         refresh();
-        start:
-        for (int i = 0; i < parent.getChildCount(); i++) {
-            if (parent.getChildAt(i) instanceof TextView) {
-                originalText = (TextView) parent.getChildAt(i);
-                break;
-            } else if (parent.getChildAt(i) instanceof ViewGroup) {
-                for (int j = 0; j < ((ViewGroup) parent.getChildAt(i)).getChildCount(); j++) {
-                    if (((ViewGroup) parent.getChildAt(i)).getChildAt(j) instanceof TextView) {
-                        originalText = (TextView) ((ViewGroup) parent.getChildAt(i)).getChildAt(j);
-                        break start;
-                    }
-                }
-            }
-        }
+        linearLayout.setOnClickListener(view -> showSettingDialog(context));
+        return linearLayout;
+    }
 
-        if (originalText != null) {
-            titleView.setTextColor(originalText.getTextColors());
-            titleView.setTextSize(TypedValue.COMPLEX_UNIT_PX, originalText.getTextSize());
-            titleView.setPadding(originalText.getPaddingLeft() == 0 ? Tools.dp2px(context, 10) : originalText.getPaddingLeft(), 0, 0, 0);
-            subView.setTextColor(originalText.getTextColors());
-            subView.setTextSize(TypedValue.COMPLEX_UNIT_PX, (int) (originalText.getTextSize() / 3.0 * 2.0));
+    /**
+     * Create the settings row with a TextView style source.
+     */
+    private LinearLayout createSettingsRow(Context context, TextView styleSource) {
+        LinearLayout linearLayout = new LinearLayout(context);
+        linearLayout.setGravity(Gravity.CENTER_VERTICAL);
+        linearLayout.setOrientation(LinearLayout.HORIZONTAL);
+
+        titleView = new TextView(context);
+        linearLayout.addView(titleView);
+        subView = new TextView(context);
+        linearLayout.addView(subView);
+        refresh();
+
+        if (styleSource != null) {
+            titleView.setTextColor(styleSource.getTextColors());
+            titleView.setTextSize(TypedValue.COMPLEX_UNIT_PX, styleSource.getTextSize());
+            titleView.setPadding(styleSource.getPaddingLeft() == 0 ? Tools.dp2px(context, 10) : styleSource.getPaddingLeft(), 0, 0, 0);
+            subView.setTextColor(styleSource.getTextColors());
+            subView.setTextSize(TypedValue.COMPLEX_UNIT_PX, (int) (styleSource.getTextSize() / 3.0 * 2.0));
         }
 
         linearLayout.setOnClickListener(view -> showSettingDialog(context));
-        } catch (Exception e) {
-            XposedBridge.log("[dolby_beta] SettingHook: initView failed: " + e.getMessage());
-        }
+        return linearLayout;
     }
 
     @SuppressLint("SetTextI18n")

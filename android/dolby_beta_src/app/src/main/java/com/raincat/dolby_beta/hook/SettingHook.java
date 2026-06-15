@@ -549,22 +549,21 @@ public class SettingHook {
 
         // If no background was copied from existing row, leave transparent (text is visible on any background)
 
-        // Reuse the style from the native path if RN style didn't yield results
-        // Title text
+        // Title text — force white color since the settings page has a dark/gray background
         titleView = new TextView(context);
+        titleView.setTextColor(0xFFFFFFFF); // white
         if (existingTextSize > 0) {
             titleView.setTextSize(TypedValue.COMPLEX_UNIT_PX, existingTextSize);
-            titleView.setTextColor(existingTextColor);
         } else {
             titleView.setTextSize(16);
         }
         outerWrapper.addView(titleView);
 
-        // Subtitle text
+        // Subtitle text — force white with slight transparency for visual hierarchy
         subView = new TextView(context);
+        subView.setTextColor(0xCCFFFFFF); // 80% white
         if (existingTextSize > 0) {
             subView.setTextSize(TypedValue.COMPLEX_UNIT_PX, existingTextSize * 0.8f);
-            subView.setTextColor(existingTextColor);
         } else {
             subView.setTextSize(12);
         }

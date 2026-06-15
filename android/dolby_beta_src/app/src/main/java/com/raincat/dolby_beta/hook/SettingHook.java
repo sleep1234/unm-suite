@@ -151,6 +151,10 @@ public class SettingHook {
      * Ensure the settings row exists in the view hierarchy.
      * If it already exists (found by tag), just refresh the subtitle text.
      * If not, find a suitable container and insert it.
+     *
+     * RN pages are rendered asynchronously — views may not be ready when onResume fires.
+     * We handle this by posting a delayed retry when we detect the settings page
+     * but can't find the content yet.
      */
     private void ensureSettingsRow(Activity activity) {
         try {
@@ -168,11 +172,10 @@ public class SettingHook {
                 }
             }
 
-            // Row not found — need to insert it
             // Register broadcast first
             registerBroadcastReceiverOnce(activity);
 
-            // Try to find and insert into the RN settings page layout
+            // Try to insert into the RN settings page layout
             if (tryInsertIntoRNSettings(activity)) {
                 return;
             }
@@ -182,7 +185,32 @@ public class SettingHook {
                 return;
             }
 
-            XposedBridge.log("[dolby_beta] SettingHook: all strategies failed, settings UI will not appear");
+            // If we got here, all strategies failed. This could be because:
+            // 1. The RN page hasn't finished rendering yet (most common)
+            // 2. We're on a different RN page entirely
+            // Schedule a delayed retry to handle the async rendering case.
+            XposedBridge.log("[dolby_beta] SettingHook: all strategies failed, scheduling delayed retry");
+            activity.getWindow().getDecorView().postDelayed(() -> {
+                try {
+                    // Check again if row was already inserted (by a previous retry)
+                    View cv = activity.findViewById(android.R.id.content);
+                    if (cv != null && cv.findViewWithTag(SETTINGS_ROW_TAG) != null) {
+                        XposedBridge.log("[dolby_beta] SettingHook: delayed retry found row already present");
+                        return;
+                    }
+                    if (tryInsertIntoRNSettings(activity)) {
+                        XposedBridge.log("[dolby_beta] SettingHook: delayed retry succeeded (RN)");
+                        return;
+                    }
+                    if (tryInsertViaContentRoot(activity)) {
+                        XposedBridge.log("[dolby_beta] SettingHook: delayed retry succeeded (native)");
+                        return;
+                    }
+                    XposedBridge.log("[dolby_beta] SettingHook: delayed retry also failed");
+                } catch (Exception e) {
+                    XposedBridge.log("[dolby_beta] SettingHook: delayed retry exception: " + e.getMessage());
+                }
+            }, 500); // 500ms delay for RN content to render
         } catch (Exception e) {
             XposedBridge.log("[dolby_beta] SettingHook: ensureSettingsRow failed: " + e.getMessage());
             e.printStackTrace();
@@ -251,7 +279,7 @@ public class SettingHook {
      * Limited depth to avoid performance issues when scanning large RN view trees.
      */
     private boolean findTextInView(View root, String target) {
-        return findTextInViewInternal(root, target, 0, 8);
+        return findTextInViewInternal(root, target, 0, 15);
     }
 
     private boolean findTextInViewInternal(View root, String target, int depth, int maxDepth) {
@@ -516,8 +544,8 @@ public class SettingHook {
             if (result != null) return result;
         }
 
-        // Fallback: any vertical LinearLayout with multiple children (>= 3 to skip the contentContainer)
-        if (group.getChildCount() >= 3) {
+        // Fallback: any vertical LinearLayout with multiple children (>= 5 to skip the outer contentContainer with only 3)
+        if (group.getChildCount() >= 5) {
             if (group instanceof LinearLayout && ((LinearLayout) group).getOrientation() == LinearLayout.VERTICAL) {
                 XposedBridge.log("[dolby_beta] SettingHook: fallback to vertical LinearLayout with " + group.getChildCount() + " children");
                 return group;

@@ -132,47 +132,104 @@ public class ClassHelper {
 
         public static String getCookie(Context context) {
             if (clazz == null) {
-                Pattern pattern;
-                if (versionCode < 154)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]\\.[a-z]$");
-                else if (versionCode < 800)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]\\.[a-z]\\.[a-z]$");
-                else
-                    // 9.x+: 更宽泛的匹配，支持更多子包层级
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.(network\\.)?[a-z]\\.[a-z]\\.[a-z](\\.[a-z])?$");
-                List<String> list = getFilteredClasses(pattern, null);
+                if (versionCode >= 800) {
+                    // 9.x+: Phase 1 - try known direct class names first
+                    XposedBridge.log("[dolby_beta] Cookie: trying direct class name lookup for v9.x+");
+                    Class<?> directClazz = findClassIfExists("com.netease.cloudmusic.network.cookie.store.AbsCookieStore", classLoader);
+                    if (directClazz != null) {
+                        XposedBridge.log("[dolby_beta] Cookie: found AbsCookieStore directly");
+                        abstractClazz = directClazz;
+                        // Try to find concrete subclass
+                        try {
+                            Pattern broadPattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.cookie\\..+$");
+                            List<String> subList = getFilteredClasses(broadPattern, null);
+                            clazz = Stream.of(subList)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null && c != abstractClazz)
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> !Modifier.isInterface(c.getModifiers()))
+                                    .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                    .filter(c -> c.getSuperclass() == abstractClazz)
+                                    .findFirst()
+                                    .orElse(abstractClazz);
+                        } catch (Exception e) {
+                            XposedBridge.log("[dolby_beta] Cookie: subclass search failed, using abstract class directly");
+                            clazz = abstractClazz;
+                        }
+                    }
 
-                try {
-                    abstractClazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(c -> c.getSuperclass() == Object.class)
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == ConcurrentHashMap.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == SharedPreferences.class))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == long.class))
-                            .findFirst()
-                            .get();
+                    if (abstractClazz == null) {
+                        // Phase 2 - broad regex + feature detection fallback
+                        XposedBridge.log("[dolby_beta] Cookie: direct lookup failed, trying broad regex scan");
+                        Pattern broadPattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\..+$");
+                        List<String> list = getFilteredClasses(broadPattern, null);
+                        try {
+                            abstractClazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null)
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> c.getSuperclass() == Object.class)
+                                    .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == ConcurrentHashMap.class))
+                                    .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == SharedPreferences.class))
+                                    .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == long.class))
+                                    .findFirst()
+                                    .get();
 
-                    if (versionCode >= 154) {
-                        // versionCode >= 154 (包括 9.x+)：需要找抽象类的具体子类
-                        clazz = Stream.of(list)
+                            // Find concrete subclass
+                            clazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null)
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> !Modifier.isInterface(c.getModifiers()))
+                                    .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                    .filter(c -> c.getSuperclass() == abstractClazz)
+                                    .findFirst()
+                                    .orElse(abstractClazz);
+                        } catch (NoSuchElementException e) {
+                            XposedBridge.log("[dolby_beta] Cookie: broad regex scan also failed");
+                            MessageHelper.sendNotification(context, MessageHelper.cookieClassNotFoundCode);
+                        }
+                    }
+                } else {
+                    // Legacy versions
+                    Pattern pattern;
+                    if (versionCode < 154)
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]\\.[a-z]$");
+                    else
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]\\.[a-z]\\.[a-z]$");
+                    List<String> list = getFilteredClasses(pattern, null);
+
+                    try {
+                        abstractClazz = Stream.of(list)
                                 .map(ClassHelper::getClassByXposed)
                                 .filter(c -> Modifier.isPublic(c.getModifiers()))
-                                .filter(m -> !Modifier.isInterface(m.getModifiers()))
-                                .filter(c -> {
-                                    try {
-                                        return c.getSuperclass() == abstractClazz;
-                                    } catch (Exception e) {
-                                        return false;
-                                    }
-                                })
+                                .filter(c -> c.getSuperclass() == Object.class)
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == ConcurrentHashMap.class))
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == SharedPreferences.class))
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == long.class))
                                 .findFirst()
-                                .orElse(abstractClazz);
-                    } else {
-                        clazz = abstractClazz;
+                                .get();
+
+                        if (versionCode >= 154) {
+                            clazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(m -> !Modifier.isInterface(m.getModifiers()))
+                                    .filter(c -> {
+                                        try {
+                                            return c.getSuperclass() == abstractClazz;
+                                        } catch (Exception e) {
+                                            return false;
+                                        }
+                                    })
+                                    .findFirst()
+                                    .orElse(abstractClazz);
+                        } else {
+                            clazz = abstractClazz;
+                        }
+                    } catch (NoSuchElementException e) {
+                        MessageHelper.sendNotification(context, MessageHelper.cookieClassNotFoundCode);
                     }
-                } catch (NoSuchElementException e) {
-                    MessageHelper.sendNotification(context, MessageHelper.cookieClassNotFoundCode);
                 }
             }
 
@@ -586,28 +643,87 @@ public class ClassHelper {
 
         static Class<?> getClazz(Context context) {
             if (clazz == null) {
-                Pattern pattern;
-                if (versionCode < 154)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]\\.[a-z]$");
-                else if (versionCode < 800)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]\\.[a-z]\\.[a-z]$");
-                else
-                    // 9.x+: 更宽泛的匹配
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.(network\\.)?[a-z]\\.[a-z]\\.[a-z](\\.[a-z])?$");
-                List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
+                if (versionCode >= 800) {
+                    // 9.x+: broad regex scan for HttpResponse
+                    XposedBridge.log("[dolby_beta] HttpResponse: scanning with broad regex for v9.x+");
+                    Pattern broadPattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\..+$");
+                    List<String> list = ClassHelper.getFilteredClasses(broadPattern, Collections.reverseOrder());
 
-                try {
-                    clazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> !Modifier.isAbstract(c.getModifiers()))
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(c -> Modifier.isFinal(c.getModifiers()))
-                            .filter(c -> c.getSuperclass() == Object.class)
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == OKHttp3Response.getClazz(context)))
-                            .findFirst()
-                            .get();
-                } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    try {
+                        Class<?> okHttp3ResponseClazz = OKHttp3Response.getClazz(context);
+                        if (okHttp3ResponseClazz != null) {
+                            // Strategy 1: strict match (public + final + Object + has OKHttp3Response field)
+                            clazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null)
+                                    .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> c.getSuperclass() == Object.class)
+                                    .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == okHttp3ResponseClazz))
+                                    .findFirst()
+                                    .orElse(null);
+                        }
+                        if (clazz == null) {
+                            // Strategy 2: relaxed match - not abstract, public, has field with type that implements Closeable
+                            // and that field type has okhttp3 fields
+                            XposedBridge.log("[dolby_beta] HttpResponse: strict match failed, trying relaxed match");
+                            clazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null)
+                                    .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> c.getSuperclass() == Object.class)
+                                    .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(f ->
+                                            Stream.of(f.getType().getInterfaces()).anyMatch(i -> i == Closeable.class)
+                                                    || f.getType().getName().startsWith("okhttp3")))
+                                    .findFirst()
+                                    .orElse(null);
+                        }
+                        if (clazz == null) {
+                            // Strategy 3: find class with method that has 2 exception types (the EAPI result method)
+                            XposedBridge.log("[dolby_beta] HttpResponse: relaxed match failed, trying method signature match");
+                            clazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null)
+                                    .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> c.getSuperclass() == Object.class)
+                                    .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getExceptionTypes().length >= 2))
+                                    .findFirst()
+                                    .orElse(null);
+                        }
+                        if (clazz != null) {
+                            XposedBridge.log("[dolby_beta] HttpResponse: found class " + clazz.getName());
+                        } else {
+                            XposedBridge.log("[dolby_beta] HttpResponse: no suitable class found");
+                        }
+                    } catch (Exception e) {
+                        XposedBridge.log("[dolby_beta] HttpResponse: exception during scan: " + e.getMessage());
+                    }
+                    if (clazz == null)
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                } else {
+                    // Legacy versions
+                    Pattern pattern;
+                    if (versionCode < 154)
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]\\.[a-z]$");
+                    else
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]\\.[a-z]\\.[a-z]$");
+                    List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
+
+                    try {
+                        clazz = Stream.of(list)
+                                .map(ClassHelper::getClassByXposed)
+                                .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                .filter(c -> Modifier.isFinal(c.getModifiers()))
+                                .filter(c -> c.getSuperclass() == Object.class)
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == OKHttp3Response.getClazz(context)))
+                                .findFirst()
+                                .get();
+                    } catch (Exception e) {
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    }
                 }
             }
             return clazz;
@@ -615,23 +731,60 @@ public class ClassHelper {
 
         public Object getResponseObject(Context context) throws IllegalAccessException, NullPointerException {
             Field[] fields = getClazz(context).getDeclaredFields();
-            Field dataField = Stream.of(fields)
-                    .filter(f -> Stream.of(f.getType().getInterfaces()).anyMatch(i -> i == Closeable.class))
-                    .filter(f -> Stream.of(f.getType().getDeclaredFields()).anyMatch(pf -> pf.getType().getName().startsWith("okhttp3")))
-                    .findFirst().get();
-
+            // Strategy 1: find field implementing Closeable with okhttp3 sub-fields
+            Field dataField = null;
+            try {
+                dataField = Stream.of(fields)
+                        .filter(f -> Stream.of(f.getType().getInterfaces()).anyMatch(i -> i == Closeable.class))
+                        .filter(f -> Stream.of(f.getType().getDeclaredFields()).anyMatch(pf -> pf.getType().getName().startsWith("okhttp3")))
+                        .findFirst().get();
+            } catch (Exception e) {
+                // Strategy 2: find field whose type name starts with okhttp3
+                XposedBridge.log("[dolby_beta] HttpResponse.getResponseObject: Closeable match failed, trying okhttp3 field");
+                dataField = Stream.of(fields)
+                        .filter(f -> f.getType().getName().startsWith("okhttp3"))
+                        .findFirst()
+                        .orElse(null);
+                if (dataField == null) {
+                    // Strategy 3: find field implementing Closeable
+                    dataField = Stream.of(fields)
+                            .filter(f -> Stream.of(f.getType().getInterfaces()).anyMatch(i -> i == Closeable.class))
+                            .findFirst()
+                            .orElse(null);
+                }
+            }
+            if (dataField == null) throw new NullPointerException("getResponseObject: no suitable field found");
             dataField.setAccessible(true);
             return dataField.get(httpResponse);
         }
 
         public Object getEapi(Context context) throws IllegalAccessException, NullPointerException {
             Field[] fields = getClazz(context).getDeclaredFields();
-            Field dataField = Stream.of(fields)
-                    .filter(c -> Modifier.isAbstract(c.getType().getModifiers()))
-                    .filter(c -> c.getType().getSuperclass() == Object.class)
-                    .filter(c -> Stream.of(c.getType().getDeclaredFields()).anyMatch(m -> m.getType().getName().startsWith("okhttp3")))
-                    .findFirst().get();
-
+            // Strategy 1: abstract type with Object superclass and okhttp3 fields
+            Field dataField = null;
+            try {
+                dataField = Stream.of(fields)
+                        .filter(c -> Modifier.isAbstract(c.getType().getModifiers()))
+                        .filter(c -> c.getType().getSuperclass() == Object.class)
+                        .filter(c -> Stream.of(c.getType().getDeclaredFields()).anyMatch(m -> m.getType().getName().startsWith("okhttp3")))
+                        .findFirst().get();
+            } catch (Exception e) {
+                // Strategy 2: any abstract field (the eapi/params object)
+                XposedBridge.log("[dolby_beta] HttpResponse.getEapi: strict match failed, trying abstract field");
+                dataField = Stream.of(fields)
+                        .filter(c -> Modifier.isAbstract(c.getType().getModifiers()))
+                        .findFirst()
+                        .orElse(null);
+            }
+            if (dataField == null) {
+                // Strategy 3: any field with Uri type or String fields typical of eapi
+                XposedBridge.log("[dolby_beta] HttpResponse.getEapi: trying Uri field match");
+                dataField = Stream.of(fields)
+                        .filter(f -> Stream.of(f.getType().getDeclaredFields()).anyMatch(m -> m.getType() == android.net.Uri.class))
+                        .findFirst()
+                        .orElse(null);
+            }
+            if (dataField == null) throw new NullPointerException("getEapi: no suitable field found");
             dataField.setAccessible(true);
             return dataField.get(httpResponse);
         }
@@ -645,11 +798,26 @@ public class ClassHelper {
                         return null;
                     }
                     List<Method> methodList = Arrays.asList(cls.getDeclaredMethods());
+                    // Strategy 1: find method with 2 exception types (original approach)
                     getResultMethod = Stream.of(methodList)
                             .filter(m -> m.getExceptionTypes().length == 2)
                             .findFirst()
-                            .get();
+                            .orElse(null);
+                    if (getResultMethod == null) {
+                        // Strategy 2: find method with >=1 exception types and non-void return
+                        XposedBridge.log("[dolby_beta] HttpResponse.getResultMethod: 2-exception match failed, trying relaxed");
+                        getResultMethod = Stream.of(methodList)
+                                .filter(m -> m.getExceptionTypes().length >= 1)
+                                .filter(m -> m.getReturnType() != void.class)
+                                .filter(m -> Modifier.isPublic(m.getModifiers()) || Modifier.isProtected(m.getModifiers()))
+                                .findFirst()
+                                .orElse(null);
+                    }
+                    if (getResultMethod != null) {
+                        XposedBridge.log("[dolby_beta] HttpResponse.getResultMethod: found " + getResultMethod.getName());
+                    }
                 } catch (Exception e) {
+                    XposedBridge.log("[dolby_beta] HttpResponse.getResultMethod exception: " + e.getMessage());
                     MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
                 }
             }
@@ -665,26 +833,68 @@ public class ClassHelper {
 
         static Class<?> getClazz(Context context) {
             if (clazz == null) {
-                Pattern pattern;
-                if (versionCode < 154)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]\\.[a-z]$");
-                else if (versionCode < 800)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]\\.[a-z]\\.[a-z]$");
-                else
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.(network\\.)?[a-z]\\.[a-z]\\.[a-z](\\.[a-z])?$");
-                List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
+                if (versionCode >= 800) {
+                    // 9.x+: broad regex scan
+                    XposedBridge.log("[dolby_beta] HttpUrl: scanning with broad regex for v9.x+");
+                    Pattern broadPattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\..+$");
+                    List<String> list = ClassHelper.getFilteredClasses(broadPattern, Collections.reverseOrder());
 
-                try {
-                    clazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> Modifier.isAbstract(c.getModifiers()))
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(c -> c.getSuperclass() == Object.class)
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType().getName().startsWith("okhttp3")))
-                            .findFirst()
-                            .get();
-                } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    try {
+                        // Strategy 1: abstract, public, Object superclass, has okhttp3 field, has Uri field
+                        clazz = Stream.of(list)
+                                .map(ClassHelper::getClassByXposed)
+                                .filter(c -> c != null)
+                                .filter(c -> Modifier.isAbstract(c.getModifiers()))
+                                .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                .filter(c -> c.getSuperclass() == Object.class)
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType().getName().startsWith("okhttp3")))
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == android.net.Uri.class))
+                                .findFirst()
+                                .orElse(null);
+                        if (clazz != null) {
+                            XposedBridge.log("[dolby_beta] HttpUrl: found with Uri field: " + clazz.getName());
+                        } else {
+                            // Strategy 2: abstract, public, Object superclass, has okhttp3 field (Uri might be in subclass)
+                            XposedBridge.log("[dolby_beta] HttpUrl: trying without Uri filter");
+                            clazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null)
+                                    .filter(c -> Modifier.isAbstract(c.getModifiers()))
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> c.getSuperclass() == Object.class)
+                                    .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType().getName().startsWith("okhttp3")))
+                                    .findFirst()
+                                    .orElse(null);
+                            if (clazz != null) {
+                                XposedBridge.log("[dolby_beta] HttpUrl: found without Uri: " + clazz.getName());
+                            }
+                        }
+                    } catch (Exception e) {
+                        XposedBridge.log("[dolby_beta] HttpUrl: exception: " + e.getMessage());
+                    }
+                    if (clazz == null)
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                } else {
+                    // Legacy versions
+                    Pattern pattern;
+                    if (versionCode < 154)
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]\\.[a-z]$");
+                    else
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]\\.[a-z]\\.[a-z]$");
+                    List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
+
+                    try {
+                        clazz = Stream.of(list)
+                                .map(ClassHelper::getClassByXposed)
+                                .filter(c -> Modifier.isAbstract(c.getModifiers()))
+                                .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                .filter(c -> c.getSuperclass() == Object.class)
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType().getName().startsWith("okhttp3")))
+                                .findFirst()
+                                .get();
+                    } catch (Exception e) {
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    }
                 }
             }
             return clazz;
@@ -706,26 +916,68 @@ public class ClassHelper {
 
         static Class<?> getClazz(Context context) {
             if (clazz == null) {
-                Pattern pattern;
-                if (versionCode < 154)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]\\.[a-z]$");
-                else if (versionCode < 800)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]\\.[a-z]\\.[a-z]$");
-                else
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.(network\\.)?[a-z]\\.[a-z]\\.[a-z](\\.[a-z])?$");
-                List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
+                if (versionCode >= 800) {
+                    // 9.x+: broad regex scan
+                    XposedBridge.log("[dolby_beta] HttpParams: scanning with broad regex for v9.x+");
+                    Pattern broadPattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\..+$");
+                    List<String> list = ClassHelper.getFilteredClasses(broadPattern, Collections.reverseOrder());
 
-                try {
-                    clazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> Stream.of(c.getInterfaces()).anyMatch(i -> i == Serializable.class))
-                            .filter(c -> !Modifier.isAbstract(c.getModifiers()))
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == LinkedHashMap.class))
-                            .findFirst()
-                            .get();
-                } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    try {
+                        // Strategy 1: Serializable + LinkedHashMap (original approach)
+                        clazz = Stream.of(list)
+                                .map(ClassHelper::getClassByXposed)
+                                .filter(c -> c != null)
+                                .filter(c -> Stream.of(c.getInterfaces()).anyMatch(i -> i == Serializable.class))
+                                .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == LinkedHashMap.class))
+                                .findFirst()
+                                .orElse(null);
+                        if (clazz != null) {
+                            XposedBridge.log("[dolby_beta] HttpParams: found with Serializable+LinkedHashMap: " + clazz.getName());
+                        } else {
+                            // Strategy 2: not abstract, public, has LinkedHashMap (might not implement Serializable in v9.x)
+                            XposedBridge.log("[dolby_beta] HttpParams: trying without Serializable filter");
+                            clazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null)
+                                    .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == LinkedHashMap.class))
+                                    .filter(c -> c.getSuperclass() == Object.class)
+                                    .findFirst()
+                                    .orElse(null);
+                            if (clazz != null) {
+                                XposedBridge.log("[dolby_beta] HttpParams: found without Serializable: " + clazz.getName());
+                            }
+                        }
+                        if (clazz == null)
+                            MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    } catch (Exception e) {
+                        XposedBridge.log("[dolby_beta] HttpParams: exception: " + e.getMessage());
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    }
+                } else {
+                    // Legacy versions
+                    Pattern pattern;
+                    if (versionCode < 154)
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]\\.[a-z]$");
+                    else
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]\\.[a-z]\\.[a-z]$");
+                    List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
+
+                    try {
+                        clazz = Stream.of(list)
+                                .map(ClassHelper::getClassByXposed)
+                                .filter(c -> Stream.of(c.getInterfaces()).anyMatch(i -> i == Serializable.class))
+                                .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                .filter(c -> Stream.of(c.getDeclaredFields()).anyMatch(m -> m.getType() == LinkedHashMap.class))
+                                .findFirst()
+                                .get();
+                    } catch (Exception e) {
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    }
                 }
             }
             return clazz;
@@ -767,27 +1019,82 @@ public class ClassHelper {
 
         static Class<?> getClazz(Context context) {
             if (clazz == null) {
-                Pattern pattern;
-                if (versionCode < 154)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]");
-                else if (versionCode < 800)
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]");
-                else
-                    // 9.x+: 更宽泛匹配
-                    pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.(network\\.)?[a-z](\\.[a-z])?");
-                try {
-                    List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
-                    clazz = Stream.of(list)
-                            .map(ClassHelper::getClassByXposed)
-                            .filter(c -> c.getInterfaces().length == 1)
-                            .filter(c -> Stream.of(c.getInterfaces()).anyMatch(i -> i.getName().contains("Interceptor")))
-                            .filter(c -> !Modifier.isAbstract(c.getModifiers()))
-                            .filter(c -> Modifier.isPublic(c.getModifiers()))
-                            .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType().getName().contains("Pair")))
-                            .findFirst()
-                            .get();
-                } catch (Exception e) {
-                    MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                if (versionCode >= 800) {
+                    // 9.x+: direct class name + broad regex fallback
+                    XposedBridge.log("[dolby_beta] HttpInterceptor: scanning for v9.x+");
+                    // Phase 1: try known direct class name
+                    clazz = findClassIfExists("com.netease.cloudmusic.network.interceptor.i", classLoader);
+                    if (clazz != null) {
+                        // Verify it implements Interceptor
+                        boolean isInterceptor = Stream.of(clazz.getInterfaces())
+                                .anyMatch(i -> i.getName().contains("Interceptor"));
+                        if (!isInterceptor) {
+                            XposedBridge.log("[dolby_beta] HttpInterceptor: direct class 'i' doesn't implement Interceptor, falling back");
+                            clazz = null;
+                        } else {
+                            XposedBridge.log("[dolby_beta] HttpInterceptor: found direct class i");
+                        }
+                    }
+                    if (clazz == null) {
+                        // Phase 2: broad regex + feature detection
+                        XposedBridge.log("[dolby_beta] HttpInterceptor: direct lookup failed, trying broad regex");
+                        Pattern broadPattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\..+$");
+                        try {
+                            List<String> list = ClassHelper.getFilteredClasses(broadPattern, Collections.reverseOrder());
+                            // Strategy 1: implement Interceptor, not abstract, public, has method returning Pair
+                            clazz = Stream.of(list)
+                                    .map(ClassHelper::getClassByXposed)
+                                    .filter(c -> c != null)
+                                    .filter(c -> Stream.of(c.getInterfaces()).anyMatch(i -> i.getName().contains("Interceptor")))
+                                    .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                    .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                    .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType().getName().contains("Pair")))
+                                    .findFirst()
+                                    .orElse(null);
+                            if (clazz == null) {
+                                // Strategy 2: implement Interceptor, not abstract, no Pair requirement
+                                XposedBridge.log("[dolby_beta] HttpInterceptor: Pair match failed, trying without Pair");
+                                clazz = Stream.of(list)
+                                        .map(ClassHelper::getClassByXposed)
+                                        .filter(c -> c != null)
+                                        .filter(c -> Stream.of(c.getInterfaces()).anyMatch(i -> i.getName().contains("Interceptor")))
+                                        .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                        .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                        .findFirst()
+                                        .orElse(null);
+                            }
+                            if (clazz != null) {
+                                XposedBridge.log("[dolby_beta] HttpInterceptor: found " + clazz.getName());
+                            } else {
+                                XposedBridge.log("[dolby_beta] HttpInterceptor: no class found");
+                            }
+                        } catch (Exception e) {
+                            XposedBridge.log("[dolby_beta] HttpInterceptor: exception: " + e.getMessage());
+                        }
+                    }
+                    if (clazz == null)
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                } else {
+                    // Legacy versions
+                    Pattern pattern;
+                    if (versionCode < 154)
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.[a-z]\\.[a-z]\\.[a-z]");
+                    else
+                        pattern = Pattern.compile("^com\\.netease\\.cloudmusic\\.network\\.[a-z]");
+                    try {
+                        List<String> list = ClassHelper.getFilteredClasses(pattern, Collections.reverseOrder());
+                        clazz = Stream.of(list)
+                                .map(ClassHelper::getClassByXposed)
+                                .filter(c -> c.getInterfaces().length == 1)
+                                .filter(c -> Stream.of(c.getInterfaces()).anyMatch(i -> i.getName().contains("Interceptor")))
+                                .filter(c -> !Modifier.isAbstract(c.getModifiers()))
+                                .filter(c -> Modifier.isPublic(c.getModifiers()))
+                                .filter(c -> Stream.of(c.getDeclaredMethods()).anyMatch(m -> m.getReturnType().getName().contains("Pair")))
+                                .findFirst()
+                                .get();
+                    } catch (Exception e) {
+                        MessageHelper.sendNotification(context, MessageHelper.coreClassNotFoundCode);
+                    }
                 }
             }
             return clazz;
@@ -798,11 +1105,32 @@ public class ClassHelper {
                 methodList = new ArrayList<>();
                 Class<?> cls = getClazz(context);
                 if (cls != null) {
-                    methodList.addAll(Stream.of(cls.getDeclaredMethods())
+                    // Strategy 1: methods with 1 exception type, 5 params, return type with "Response"
+                    List<Method> filtered = Stream.of(cls.getDeclaredMethods())
                             .filter(m -> m.getExceptionTypes().length == 1)
                             .filter(m -> m.getParameterTypes().length == 5)
                             .filter(m -> m.getReturnType().getName().contains("Response"))
-                            .toList());
+                            .toList();
+                    if (filtered.isEmpty()) {
+                        // Strategy 2: try methods with 1 exception type and 5 params, any return type
+                        XposedBridge.log("[dolby_beta] HttpInterceptor.getMethodList: Response match failed, trying relaxed");
+                        filtered = Stream.of(cls.getDeclaredMethods())
+                                .filter(m -> m.getExceptionTypes().length == 1)
+                                .filter(m -> m.getParameterTypes().length >= 3)
+                                .filter(m -> m.getReturnType().getName().contains("Response") || m.getReturnType() == Object.class)
+                                .toList();
+                    }
+                    if (filtered.isEmpty()) {
+                        // Strategy 3: try interceptor's intercept-like methods
+                        XposedBridge.log("[dolby_beta] HttpInterceptor.getMethodList: trying intercept method pattern");
+                        filtered = Stream.of(cls.getDeclaredMethods())
+                                .filter(m -> m.getReturnType().getName().contains("Response") || m.getReturnType() == Object.class)
+                                .filter(m -> m.getParameterTypes().length >= 1)
+                                .filter(m -> m.getExceptionTypes().length >= 1)
+                                .toList();
+                    }
+                    methodList.addAll(filtered);
+                    XposedBridge.log("[dolby_beta] HttpInterceptor.getMethodList: found " + methodList.size() + " methods");
                 }
             }
             return methodList;

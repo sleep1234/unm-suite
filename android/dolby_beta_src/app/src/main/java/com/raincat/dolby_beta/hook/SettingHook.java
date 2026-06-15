@@ -59,12 +59,14 @@ import com.raincat.dolby_beta.view.setting.ListenView;
 import com.raincat.dolby_beta.view.setting.WarnView;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
 import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
@@ -97,11 +99,32 @@ public class SettingHook {
         }
         Class<?> settingActivityClass = findClassIfExists(SettingActivity, context.getClassLoader());
         Field[] allFields = settingActivityClass.getDeclaredFields();
+        // Find a Switch-like view field for anchoring our settings UI
+        // Try multiple type name patterns: Switch, SwitchCompat, MaterialSwitch, CompoundButton
+        String[] switchPatterns = {"Switch", "switch", "CompoundButton", "compoundbutton", "Toggle", "toggle"};
         for (Field field : allFields) {
-            if (field.getType().getName().contains("Switch")) {
-                switchViewName = field.getName();
-                break;
+            String typeName = field.getType().getName();
+            for (String pattern : switchPatterns) {
+                if (typeName.contains(pattern)) {
+                    switchViewName = field.getName();
+                    break;
+                }
             }
+            if (!switchViewName.isEmpty()) break;
+        }
+        // If no Switch-like field found, try any View field as anchor
+        if (switchViewName.isEmpty()) {
+            XposedBridge.log("[dolby_beta] SettingHook: no Switch field found, trying View field");
+            for (Field field : allFields) {
+                if (field.getType().getName().contains("View") && !Modifier.isStatic(field.getModifiers())) {
+                    switchViewName = field.getName();
+                    XposedBridge.log("[dolby_beta] SettingHook: using View field as anchor: " + switchViewName);
+                    break;
+                }
+            }
+        }
+        if (switchViewName.isEmpty()) {
+            XposedBridge.log("[dolby_beta] SettingHook: no suitable anchor field found, settings UI may not appear");
         }
 
         findAndHookMethod(settingActivityClass, "onCreate", Bundle.class, new XC_MethodHook() {
@@ -127,6 +150,11 @@ public class SettingHook {
     }
 
     private void initView(final Context context) {
+        if (switchViewName.isEmpty()) {
+            XposedBridge.log("[dolby_beta] SettingHook: no anchor field, skipping initView");
+            return;
+        }
+        try {
         TextView originalText = null;
         //获取开关控件
         View switchCompat = (View) XposedHelpers.getObjectField(context, switchViewName);
@@ -172,6 +200,9 @@ public class SettingHook {
         }
 
         linearLayout.setOnClickListener(view -> showSettingDialog(context));
+        } catch (Exception e) {
+            XposedBridge.log("[dolby_beta] SettingHook: initView failed: " + e.getMessage());
+        }
     }
 
     @SuppressLint("SetTextI18n")

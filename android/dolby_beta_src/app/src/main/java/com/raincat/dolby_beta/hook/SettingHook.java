@@ -256,37 +256,47 @@ public class SettingHook {
 
     /**
      * Find a suitable vertical container in the view hierarchy.
-     * We look for a ViewGroup that has multiple children and is likely a settings list.
+     * Priority: ScrollView > LinearLayout (the preferenceRoot inside a ScrollView).
+     * We want the deepest suitable container that holds actual settings rows,
+     * NOT the top-level contentContainer that holds statusbar + toolbar + scrollview.
      */
     private ViewGroup findVerticalContainer(View root) {
         if (!(root instanceof ViewGroup)) return null;
         ViewGroup group = (ViewGroup) root;
 
-        // If this is a vertical LinearLayout or ScrollView with multiple children, it's likely our target
-        if (group.getChildCount() >= 2) {
-            if (group instanceof LinearLayout && ((LinearLayout) group).getOrientation() == LinearLayout.VERTICAL) {
-                return group;
-            }
-            // ScrollView's single child is often the settings list
-            if (group instanceof ScrollView && group.getChildCount() > 0) {
-                View child = group.getChildAt(0);
-                if (child instanceof ViewGroup) {
-                    return (ViewGroup) child;
-                }
-            }
-            // RecyclerView or ListView
-            String className = group.getClass().getName();
-            if (className.contains("RecyclerView") || className.contains("ListView") || className.contains("Recycler")) {
-                return group;
+        // Highest priority: ScrollView's child LinearLayout (preferenceRoot)
+        // This is the actual settings list container
+        if (group instanceof ScrollView && group.getChildCount() > 0) {
+            View child = group.getChildAt(0);
+            if (child instanceof LinearLayout && ((LinearLayout) child).getOrientation() == LinearLayout.VERTICAL) {
+                XposedBridge.log("[dolby_beta] SettingHook: found ScrollView > LinearLayout (preferenceRoot)");
+                return (ViewGroup) child;
             }
         }
 
-        // Recursively search children, prioritizing deeper containers
+        // Second priority: look for resource-id "preferenceRoot" or "preferenceScrollView"
+        String resName = "";
+        try { resName = group.getId() > 0 ? group.getResources().getResourceEntryName(group.getId()) : ""; } catch (Exception ignored) {}
+        if (resName.equals("preferenceRoot")) {
+            XposedBridge.log("[dolby_beta] SettingHook: found preferenceRoot by resource-id");
+            return group;
+        }
+
+        // Recursively search children (depth-first to find deepest match)
         for (int i = 0; i < group.getChildCount(); i++) {
             View child = group.getChildAt(i);
             ViewGroup result = findVerticalContainer(child);
             if (result != null) return result;
         }
+
+        // Fallback: any vertical LinearLayout with multiple children (>= 3 to skip the contentContainer)
+        if (group.getChildCount() >= 3) {
+            if (group instanceof LinearLayout && ((LinearLayout) group).getOrientation() == LinearLayout.VERTICAL) {
+                XposedBridge.log("[dolby_beta] SettingHook: fallback to vertical LinearLayout with " + group.getChildCount() + " children");
+                return group;
+            }
+        }
+
         return null;
     }
 

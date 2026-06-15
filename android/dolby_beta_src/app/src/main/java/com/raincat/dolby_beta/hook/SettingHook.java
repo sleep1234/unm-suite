@@ -165,14 +165,12 @@ public class SettingHook {
                 if (existingRow != null) {
                     // Row already present — just refresh the subtitle
                     refresh();
-                    // Also ensure broadcast receiver is registered
                     registerBroadcastReceiverOnce(activity);
                     XposedBridge.log("[dolby_beta] SettingHook: row already present, refreshed");
                     return;
                 }
             }
 
-            // Register broadcast first
             registerBroadcastReceiverOnce(activity);
 
             // Try to insert into the RN settings page layout
@@ -185,35 +183,90 @@ public class SettingHook {
                 return;
             }
 
-            // If we got here, all strategies failed. This could be because:
-            // 1. The RN page hasn't finished rendering yet (most common)
-            // 2. We're on a different RN page entirely
-            // Schedule a delayed retry to handle the async rendering case.
+            // All strategies failed — schedule delayed retries for async RN rendering
             XposedBridge.log("[dolby_beta] SettingHook: all strategies failed, scheduling delayed retry");
-            activity.getWindow().getDecorView().postDelayed(() -> {
-                try {
-                    // Check again if row was already inserted (by a previous retry)
-                    View cv = activity.findViewById(android.R.id.content);
-                    if (cv != null && cv.findViewWithTag(SETTINGS_ROW_TAG) != null) {
-                        XposedBridge.log("[dolby_beta] SettingHook: delayed retry found row already present");
-                        return;
-                    }
-                    if (tryInsertIntoRNSettings(activity)) {
-                        XposedBridge.log("[dolby_beta] SettingHook: delayed retry succeeded (RN)");
-                        return;
-                    }
-                    if (tryInsertViaContentRoot(activity)) {
-                        XposedBridge.log("[dolby_beta] SettingHook: delayed retry succeeded (native)");
-                        return;
-                    }
-                    XposedBridge.log("[dolby_beta] SettingHook: delayed retry also failed");
-                } catch (Exception e) {
-                    XposedBridge.log("[dolby_beta] SettingHook: delayed retry exception: " + e.getMessage());
-                }
-            }, 500); // 500ms delay for RN content to render
+            scheduleRetry(activity, 0);
         } catch (Exception e) {
             XposedBridge.log("[dolby_beta] SettingHook: ensureSettingsRow failed: " + e.getMessage());
             e.printStackTrace();
+        }
+    }
+
+    private static final int MAX_RETRIES = 5;
+    private static final int RETRY_INTERVAL_MS = 300;
+
+    private void scheduleRetry(Activity activity, int retryCount) {
+        if (retryCount >= MAX_RETRIES) {
+            XposedBridge.log("[dolby_beta] SettingHook: max retries reached, giving up");
+            return;
+        }
+        activity.getWindow().getDecorView().postDelayed(() -> {
+            try {
+                View cv = activity.findViewById(android.R.id.content);
+                if (cv != null && cv.findViewWithTag(SETTINGS_ROW_TAG) != null) {
+                    XposedBridge.log("[dolby_beta] SettingHook: retry #" + retryCount + " found row already present");
+                    return;
+                }
+                if (tryInsertIntoRNSettings(activity)) {
+                    XposedBridge.log("[dolby_beta] SettingHook: retry #" + retryCount + " succeeded (RN)");
+                    return;
+                }
+                if (tryInsertViaContentRoot(activity)) {
+                    XposedBridge.log("[dolby_beta] SettingHook: retry #" + retryCount + " succeeded (native)");
+                    return;
+                }
+                // On first retry, dump the view tree for diagnosis
+                if (retryCount == 0) {
+                    dumpViewTree(activity);
+                }
+                scheduleRetry(activity, retryCount + 1);
+            } catch (Exception e) {
+                XposedBridge.log("[dolby_beta] SettingHook: retry #" + retryCount + " exception: " + e.getMessage());
+            }
+        }, RETRY_INTERVAL_MS);
+    }
+
+    /**
+     * Dump the view tree structure for diagnostic purposes.
+     */
+    private void dumpViewTree(Activity activity) {
+        try {
+            View root = activity.findViewById(android.R.id.content);
+            if (root == null) {
+                XposedBridge.log("[dolby_beta] DIAG: content root is null");
+                return;
+            }
+            StringBuilder sb = new StringBuilder();
+            dumpView(root, 0, sb);
+            // Log in chunks to avoid line length limits
+            String result = sb.toString();
+            int pos = 0;
+            while (pos < result.length()) {
+                int end = Math.min(pos + 4000, result.length());
+                XposedBridge.log("[dolby_beta] DIAG: " + result.substring(pos, end));
+                pos = end;
+            }
+        } catch (Exception e) {
+            XposedBridge.log("[dolby_beta] DIAG: " + e.getMessage());
+        }
+    }
+
+    private void dumpView(View view, int depth, StringBuilder sb) {
+        if (depth > 15) return;
+        for (int i = 0; i < depth; i++) sb.append("  ");
+        String cls = view.getClass().getSimpleName();
+        String rid = "";
+        try { if (view.getId() > 0) rid = view.getResources().getResourceEntryName(view.getId()); } catch (Exception ignored) {}
+        String text = (view instanceof TextView) ? ((TextView) view).getText().toString() : "";
+        sb.append(cls);
+        if (!rid.isEmpty()) sb.append(" id=").append(rid);
+        if (!text.isEmpty()) sb.append(" t=\"").append(text.substring(0, Math.min(text.length(), 20))).append("\"");
+        if (view instanceof ViewGroup) sb.append(" ch=").append(((ViewGroup) view).getChildCount());
+        sb.append("\n");
+        if (view instanceof ViewGroup) {
+            for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++) {
+                dumpView(((ViewGroup) view).getChildAt(i), depth + 1, sb);
+            }
         }
     }
 
@@ -238,27 +291,15 @@ public class SettingHook {
                 return false;
             }
 
-            // Find the scrollable FrameLayout inside the RN view tree
-            ViewGroup scrollContainer = findScrollableFrameLayout(contentView);
-            if (scrollContainer == null) {
-                XposedBridge.log("[dolby_beta] SettingHook: RN: no scrollable FrameLayout found");
+            // Find the settings row list container inside the RN view tree.
+            // findRNSettingsContainer() finds the ViewGroup that directly contains the settings rows
+            // (by counting child ViewGroups that look like settings rows), NOT a parent of it.
+            ViewGroup rowListContainer = findRNSettingsContainer(contentView);
+            if (rowListContainer == null) {
+                XposedBridge.log("[dolby_beta] SettingHook: RN: no settings container found");
                 return false;
             }
 
-            // The scrollable FrameLayout's first child should be the ViewGroup that
-            // contains all the setting rows
-            if (scrollContainer.getChildCount() == 0) {
-                XposedBridge.log("[dolby_beta] SettingHook: RN: scrollable container has no children");
-                return false;
-            }
-
-            View listChild = scrollContainer.getChildAt(0);
-            if (!(listChild instanceof ViewGroup)) {
-                XposedBridge.log("[dolby_beta] SettingHook: RN: scrollable child is not a ViewGroup: " + listChild.getClass().getName());
-                return false;
-            }
-
-            ViewGroup rowListContainer = (ViewGroup) listChild;
             XposedBridge.log("[dolby_beta] SettingHook: RN: found row list container: " + rowListContainer.getClass().getName() + ", children = " + rowListContainer.getChildCount());
 
             // Find an existing row to copy style from
@@ -297,48 +338,48 @@ public class SettingHook {
     }
 
     /**
-     * Find the first scrollable FrameLayout in the view hierarchy.
-     * In RN settings, this is the main scroll container (a FrameLayout that acts as ScrollView).
-     * We identify it by: FrameLayout instance + isScrollContainer() == true + has children with setting rows.
+     * Find the scrollable container in the RN settings page.
+     * We don't use isScrollContainer() because RN custom views don't set that flag.
+     * Instead, we look for a ViewGroup that contains >= 5 child ViewGroups
+     * that each look like a settings row (contain a clickable child with a TextView).
      */
-    private ViewGroup findScrollableFrameLayout(View root) {
+    private ViewGroup findRNSettingsContainer(View root) {
         if (!(root instanceof ViewGroup)) return null;
         ViewGroup group = (ViewGroup) root;
 
-        // Check if this is a scrollable FrameLayout (the RN scroll container)
-        // isScrollContainer() returns true for views that can scroll their content
-        if (group instanceof android.widget.FrameLayout) {
-            // Check if this looks like the RN scroll container by verifying:
-            // 1. It's scrollable
-            // 2. It has a child ViewGroup that contains multiple rows with TextViews
-            if (group.isScrollContainer() && group.getChildCount() > 0) {
-                View firstChild = group.getChildAt(0);
-                if (firstChild instanceof ViewGroup) {
-                    ViewGroup childGroup = (ViewGroup) firstChild;
-                    // Check if it has multiple children that look like setting rows
-                    int rowLikeCount = 0;
-                    for (int i = 0; i < childGroup.getChildCount(); i++) {
-                        View row = childGroup.getChildAt(i);
-                        if (row instanceof ViewGroup && hasTextView((ViewGroup) row)) {
-                            rowLikeCount++;
-                        }
-                    }
-                    if (rowLikeCount >= 5) {
-                        XposedBridge.log("[dolby_beta] SettingHook: RN: found scrollable FrameLayout with " + rowLikeCount + " row-like children");
-                        return group;
-                    }
-                }
-            }
-        }
-
-        // Recursively search children
+        // Check if this ViewGroup has multiple children that look like settings rows
+        int rowCount = 0;
         for (int i = 0; i < group.getChildCount(); i++) {
             View child = group.getChildAt(i);
-            ViewGroup result = findScrollableFrameLayout(child);
+            if (child instanceof ViewGroup && looksLikeSettingsRow((ViewGroup) child)) {
+                rowCount++;
+            }
+        }
+        if (rowCount >= 5) {
+            XposedBridge.log("[dolby_beta] SettingHook: RN: found container with " + rowCount + " row-like children: " + group.getClass().getName());
+            return group;
+        }
+
+        // Recursively search children (depth-first)
+        for (int i = 0; i < group.getChildCount(); i++) {
+            ViewGroup result = findRNSettingsContainer(group.getChildAt(i));
             if (result != null) return result;
         }
 
         return null;
+    }
+
+    /**
+     * Check if a ViewGroup looks like an RN settings row.
+     * RN settings rows typically have a clickable child that contains a TextView.
+     * Pattern: ViewGroup → [ViewGroup(clickable) → ViewGroup → [TextView + ImageView]] or [TextView directly]
+     */
+    private boolean looksLikeSettingsRow(ViewGroup group) {
+        // Quick check: has at most 4 children (typical RN row: clickable wrapper + content group)
+        if (group.getChildCount() > 6) return false;
+
+        // Look for a clickable descendant with a TextView
+        return hasClickableWithText(group);
     }
 
     /**

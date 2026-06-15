@@ -8,6 +8,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.graphics.drawable.Drawable;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -87,16 +88,16 @@ public class SettingHook {
     private LinearLayout dialogRoot, dialogProxyRoot, dialogBeautyRoot, dialogSidebarRoot;
 
     private BroadcastReceiver broadcastReceiver;
-    private boolean viewInitialized = false;
 
-    public SettingHook(Context context,int versionCode) {
+    /** Unique tag for our settings row, so we can detect if it already exists in the view hierarchy */
+    private static final String SETTINGS_ROW_TAG = "dolby_beta_settings_row";
+
+    public SettingHook(Context context, int versionCode) {
         //一切的前提，没这个页面连设置都进不去
-        if(versionCode>=8007000)
-        {
-            SettingActivity="com.netease.cloudmusic.music.biz.setting.activity.SettingActivity";
-        }else
-        {
-            SettingActivity="com.netease.cloudmusic.activity.SettingActivity";
+        if (versionCode >= 8007000) {
+            SettingActivity = "com.netease.cloudmusic.music.biz.setting.activity.SettingActivity";
+        } else {
+            SettingActivity = "com.netease.cloudmusic.activity.SettingActivity";
         }
         Class<?> settingActivityClass = findClassIfExists(SettingActivity, context.getClassLoader());
         if (settingActivityClass == null) {
@@ -105,8 +106,8 @@ public class SettingHook {
         }
         Field[] allFields = settingActivityClass.getDeclaredFields();
         XposedBridge.log("[dolby_beta] SettingHook: SettingActivity has " + allFields.length + " fields");
+
         // Find a Switch-like view field for anchoring our settings UI
-        // Try multiple type name patterns: Switch, SwitchCompat, MaterialSwitch, CompoundButton
         String[] switchPatterns = {"Switch", "switch", "CompoundButton", "compoundbutton", "Toggle", "toggle"};
         for (Field field : allFields) {
             String typeName = field.getType().getName();
@@ -131,17 +132,14 @@ public class SettingHook {
         }
         XposedBridge.log("[dolby_beta] SettingHook: anchor field = " + switchViewName);
 
-        // Hook onResume instead of onCreate - views are guaranteed to be initialized by then
+        // Hook onResume — every time the settings page is shown, ensure our row is present.
+        // We no longer use a viewInitialized guard; instead we check by tag whether the row already exists.
         findAndHookMethod(settingActivityClass, "onResume", new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 super.afterHookedMethod(param);
-                if (viewInitialized) return;
-                Context c = (Context) param.thisObject;
-                //注册广播
-                registerBroadcastReceiver(c);
-                //初始化控件
-                initView(c);
+                Activity activity = (Activity) param.thisObject;
+                ensureSettingsRow(activity);
             }
         });
 
@@ -149,23 +147,48 @@ public class SettingHook {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                 super.beforeHookedMethod(param);
-                viewInitialized = false;
-                if (broadcastReceiver != null)
-                    ((Context) param.thisObject).unregisterReceiver(broadcastReceiver);
+                if (broadcastReceiver != null) {
+                    try {
+                        ((Context) param.thisObject).unregisterReceiver(broadcastReceiver);
+                    } catch (Exception ignored) {}
+                    broadcastReceiver = null;
+                }
             }
         });
     }
 
-    private void initView(final Context context) {
+    /**
+     * Ensure the settings row exists in the view hierarchy.
+     * If it already exists (found by tag), just refresh the subtitle text.
+     * If not, find a suitable container and insert it.
+     */
+    private void ensureSettingsRow(Activity activity) {
         try {
-            // Strategy 1: Try the SwitchCompat field approach
+            // First: check if our row already exists anywhere in the activity's view tree
+            View contentView = activity.findViewById(android.R.id.content);
+            if (contentView != null) {
+                View existingRow = contentView.findViewWithTag(SETTINGS_ROW_TAG);
+                if (existingRow != null) {
+                    // Row already present — just refresh the subtitle
+                    refresh();
+                    // Also ensure broadcast receiver is registered
+                    registerBroadcastReceiverOnce(activity);
+                    XposedBridge.log("[dolby_beta] SettingHook: row already present, refreshed");
+                    return;
+                }
+            }
+
+            // Row not found — need to insert it
+            // Register broadcast first
+            registerBroadcastReceiverOnce(activity);
+
+            // Strategy 1: Try the anchor field approach
             if (!switchViewName.isEmpty()) {
-                Object fieldObj = XposedHelpers.getObjectField(context, switchViewName);
+                Object fieldObj = XposedHelpers.getObjectField(activity, switchViewName);
                 XposedBridge.log("[dolby_beta] SettingHook: field '" + switchViewName + "' = " + fieldObj);
                 if (fieldObj instanceof View) {
                     View switchView = (View) fieldObj;
-                    if (tryInsertViaAnchor(context, switchView)) {
-                        viewInitialized = true;
+                    if (tryInsertViaAnchor(activity, switchView)) {
                         return;
                     }
                 }
@@ -173,16 +196,23 @@ public class SettingHook {
 
             // Strategy 2: Traverse from content root to find a suitable container
             XposedBridge.log("[dolby_beta] SettingHook: anchor field approach failed, trying content root traversal");
-            if (tryInsertViaContentRoot(context)) {
-                viewInitialized = true;
+            if (tryInsertViaContentRoot(activity)) {
                 return;
             }
 
             XposedBridge.log("[dolby_beta] SettingHook: all strategies failed, settings UI will not appear");
         } catch (Exception e) {
-            XposedBridge.log("[dolby_beta] SettingHook: initView failed: " + e.getMessage());
+            XposedBridge.log("[dolby_beta] SettingHook: ensureSettingsRow failed: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+    /**
+     * Register broadcast receiver only once per Activity lifecycle.
+     */
+    private void registerBroadcastReceiverOnce(Context context) {
+        if (broadcastReceiver != null) return;
+        registerBroadcastReceiver(context);
     }
 
     /**
@@ -241,10 +271,9 @@ public class SettingHook {
             }
             XposedBridge.log("[dolby_beta] SettingHook: found container = " + targetContainer.getClass().getName() + ", children = " + targetContainer.getChildCount());
 
-            // Create a styled row matching the existing settings rows
             // Try to find an existing row to copy style from
-            TextView styleSource = findFirstTextView(targetContainer);
-            LinearLayout linearLayout = createSettingsRow(context, styleSource);
+            View existingRow = findFirstSettingsRow(targetContainer);
+            LinearLayout linearLayout = createSettingsRow(context, existingRow);
             targetContainer.addView(linearLayout, 0);
             XposedBridge.log("[dolby_beta] SettingHook: settings row inserted via content root at position 0");
             return true;
@@ -265,7 +294,6 @@ public class SettingHook {
         ViewGroup group = (ViewGroup) root;
 
         // Highest priority: ScrollView's child LinearLayout (preferenceRoot)
-        // This is the actual settings list container
         if (group instanceof ScrollView && group.getChildCount() > 0) {
             View child = group.getChildAt(0);
             if (child instanceof LinearLayout && ((LinearLayout) child).getOrientation() == LinearLayout.VERTICAL) {
@@ -274,7 +302,7 @@ public class SettingHook {
             }
         }
 
-        // Second priority: look for resource-id "preferenceRoot" or "preferenceScrollView"
+        // Second priority: look for resource-id "preferenceRoot"
         String resName = "";
         try { resName = group.getId() > 0 ? group.getResources().getResourceEntryName(group.getId()) : ""; } catch (Exception ignored) {}
         if (resName.equals("preferenceRoot")) {
@@ -301,6 +329,20 @@ public class SettingHook {
     }
 
     /**
+     * Find the first settings row (a ViewGroup child of the container that contains a TextView)
+     * to use as a style reference.
+     */
+    private View findFirstSettingsRow(ViewGroup root) {
+        for (int i = 0; i < root.getChildCount(); i++) {
+            View child = root.getChildAt(i);
+            if (child instanceof ViewGroup && findFirstTextView((ViewGroup) child) != null) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Find the first TextView in the view hierarchy to copy text style from.
      */
     private TextView findFirstTextView(ViewGroup root) {
@@ -317,54 +359,86 @@ public class SettingHook {
 
     /**
      * Create the settings row LinearLayout with title and subtitle.
+     * This version creates a row that matches the app's native preference item style:
+     * - Vertical LinearLayout with title on top and subtitle below
+     * - Proper padding and text sizes
+     * - Click ripple background copied from an existing row
+     * - Tagged with SETTINGS_ROW_TAG for reliable re-detection
      */
-    private LinearLayout createSettingsRow(Context context, ViewGroup styleParent) {
+    private LinearLayout createSettingsRow(Context context, View styleParent) {
         LinearLayout linearLayout = new LinearLayout(context);
+        linearLayout.setTag(SETTINGS_ROW_TAG);
+        linearLayout.setOrientation(LinearLayout.VERTICAL);
+
+        // Copy layout params from an existing row if available
         if (styleParent != null) {
-            ViewGroup.LayoutParams layoutParams = styleParent.getLayoutParams();
-            if (layoutParams != null) linearLayout.setLayoutParams(layoutParams);
-            linearLayout.setBackground(styleParent.getBackground());
-        }
-        linearLayout.setGravity(Gravity.CENTER_VERTICAL);
-        linearLayout.setOrientation(LinearLayout.HORIZONTAL);
-
-        titleView = new TextView(context);
-        linearLayout.addView(titleView);
-        subView = new TextView(context);
-        linearLayout.addView(subView);
-        refresh();
-        linearLayout.setOnClickListener(view -> showSettingDialog(context));
-        return linearLayout;
-    }
-
-    /**
-     * Create the settings row with a TextView style source.
-     */
-    private LinearLayout createSettingsRow(Context context, TextView styleSource) {
-        LinearLayout linearLayout = new LinearLayout(context);
-        linearLayout.setGravity(Gravity.CENTER_VERTICAL);
-        linearLayout.setOrientation(LinearLayout.HORIZONTAL);
-
-        titleView = new TextView(context);
-        linearLayout.addView(titleView);
-        subView = new TextView(context);
-        linearLayout.addView(subView);
-        refresh();
-
-        if (styleSource != null) {
-            titleView.setTextColor(styleSource.getTextColors());
-            titleView.setTextSize(TypedValue.COMPLEX_UNIT_PX, styleSource.getTextSize());
-            titleView.setPadding(styleSource.getPaddingLeft() == 0 ? Tools.dp2px(context, 10) : styleSource.getPaddingLeft(), 0, 0, 0);
-            subView.setTextColor(styleSource.getTextColors());
-            subView.setTextSize(TypedValue.COMPLEX_UNIT_PX, (int) (styleSource.getTextSize() / 3.0 * 2.0));
+            ViewGroup.LayoutParams lp = styleParent.getLayoutParams();
+            if (lp != null) {
+                linearLayout.setLayoutParams(new ViewGroup.LayoutParams(lp.width, lp.height));
+            }
+            // Copy background (ripple/drawable) from existing row
+            Drawable bg = styleParent.getBackground();
+            if (bg != null) {
+                linearLayout.setBackground(bg.getConstantState() != null ? bg.getConstantState().newDrawable() : bg);
+            }
         }
 
+        // Default padding if no style parent
+        int PadH = Tools.dp2px(context, 16);
+        int PadV = Tools.dp2px(context, 12);
+        linearLayout.setPadding(PadH, PadV, PadH, PadV);
+
+        // Try to get text style from an existing row
+        float titleTextSize = 0;
+        int titleTextColor = 0;
+        float subTextSize = 0;
+        int subTextColor = 0;
+        int titlePadLeft = 0;
+
+        if (styleParent instanceof ViewGroup) {
+            TextView existingTitle = findFirstTextView((ViewGroup) styleParent);
+            if (existingTitle != null) {
+                titleTextSize = existingTitle.getTextSize();
+                titleTextColor = existingTitle.getCurrentTextColor();
+                titlePadLeft = existingTitle.getPaddingLeft();
+                subTextSize = titleTextSize * 0.8f;
+                subTextColor = titleTextColor;
+            }
+        }
+
+        titleView = new TextView(context);
+        if (titleTextSize > 0) {
+            titleView.setTextSize(TypedValue.COMPLEX_UNIT_PX, titleTextSize);
+            titleView.setTextColor(titleTextColor);
+            titleView.setPadding(titlePadLeft > 0 ? titlePadLeft : 0, 0, 0, 0);
+        } else {
+            titleView.setTextSize(16);
+            titleView.setPadding(0, 0, 0, 0);
+        }
+        linearLayout.addView(titleView);
+
+        subView = new TextView(context);
+        if (subTextSize > 0) {
+            subView.setTextSize(TypedValue.COMPLEX_UNIT_PX, subTextSize);
+            subView.setTextColor(subTextColor);
+            subView.setPadding(titlePadLeft > 0 ? titlePadLeft : 0, 0, 0, 0);
+        } else {
+            subView.setTextSize(12);
+        }
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        subLp.topMargin = Tools.dp2px(context, 2);
+        subView.setLayoutParams(subLp);
+        linearLayout.addView(subView);
+
+        refresh();
         linearLayout.setOnClickListener(view -> showSettingDialog(context));
         return linearLayout;
     }
 
     @SuppressLint("SetTextI18n")
     private void refresh() {
+        if (titleView == null || subView == null) return;
         titleView.setText("杜比大喇叭β");
         if (ExtraHelper.getExtraDate(ExtraHelper.USER_ID).equals("-1")) {
             subView.setText("（USERID获取失败）");

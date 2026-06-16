@@ -31,8 +31,11 @@ jobs:
           echo "SDK: $SDK"
           echo "Compiling Tweak.x -> UNMHook.dylib"
 
+          # Step 1: Compile ObjC source (clang needs .m extension to recognize ObjC)
+          cp ios/UNMHook/Tweak.x build/Tweak.m
+
           clang++ \
-            -dynamiclib \
+            -c \
             -arch arm64 \
             -isysroot "$SDK" \
             -miphoneos-version-min=14.0 \
@@ -41,9 +44,20 @@ jobs:
             -fobjc-arc \
             -fmodules \
             -std=c++17 \
+            -o build/Tweak.o \
+            build/Tweak.m
+
+          # Step 2: Link into dylib
+          clang++ \
+            -dynamiclib \
+            -arch arm64 \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=14.0 \
+            -framework Foundation \
+            -framework UIKit \
             -install_name "@rpath/libUNMHook.dylib" \
             -o build/UNMHook.dylib \
-            ios/UNMHook/Tweak.x
+            build/Tweak.o
 
           echo "=== Build result ==="
           file build/UNMHook.dylib

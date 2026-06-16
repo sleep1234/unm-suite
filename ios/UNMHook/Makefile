@@ -12,3 +12,8 @@ UNMHook_CFLAGS = -fobjc-arc
 UNMHook_FRAMEWORKS = Foundation UIKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
+
+# Also support direct clang build (for CI without full Theos)
+.PHONY: dylib
+dylib:
+	@echo "Use CI workflow with logos preprocessor instead"

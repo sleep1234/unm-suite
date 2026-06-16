@@ -250,4 +250,52 @@ __attribute__((constructor)) static void UNMHookInit() {
     UNMLog(@"=== UNMHook v2.0.0 Loaded (Native Mode, No Theos) ===");
     UNMLog(@"API: %@", MUSIC_API_URL);
     UNMLog(@"Bitrate: %ld", (long)BITRATE);
+
+    // 弹窗确认加载成功（调试用，确认后可移除）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"UNMHook"
+                                                                       message:@"v2.0.0 已加载！音源解锁已启用"
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertAction *ok = [UIAlertAction actionWithTitle:@"好的"
+                                                     style:UIAlertActionStyleDefault
+                                                   handler:nil];
+        [alert addAction:ok];
+
+        // 获取当前可见的 ViewController
+        UIWindowScene *scene = nil;
+        for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) {
+            if (s.activationState == UISceneActivationStateForegroundActive) {
+                scene = s;
+                break;
+            }
+        }
+        if (!scene) {
+            for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) {
+                scene = s;
+                break;
+            }
+        }
+
+        UIViewController *rootVC = nil;
+        if (scene) {
+            for (UIWindow *w in scene.windows) {
+                if (w.isKeyWindow) {
+                    rootVC = w.rootViewController;
+                    break;
+                }
+            }
+        }
+        if (!rootVC) {
+            rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+        }
+
+        // 找到最顶层的 ViewController
+        while (rootVC.presentedViewController) {
+            rootVC = rootVC.presentedViewController;
+        }
+
+        if (rootVC) {
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        }
+    });
 }

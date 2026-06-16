@@ -23,59 +23,55 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Install Theos
+      - name: Build dylib with Theos/Logos
         run: |
-          export THEOS=$HOME/theos
-          git clone --recursive https://github.com/theos/theos.git $THEOS
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          # Install Theos (we only need the logos preprocessor + substrate headers)
+          export THEOS=$(mktemp -d)/theos
+          git clone --depth 1 https://github.com/theos/theos.git "$THEOS"
+          export PATH="$THEOS/bin:$PATH"
 
-      - name: Set up iOS SDK
-        run: |
-          # Create SDK directory structure
-          export THEOS=$HOME/theos
-          mkdir -p $THEOS/sdks
-          # Download iPhoneOS SDK from Xcode
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
-          if [ -n "$SDK_PATH" ] && [ -d "$SDK_PATH" ]; then
-            echo "Using Xcode SDK: $SDK_PATH"
-            ln -sf "$SDK_PATH" $THEOS/sdks/iPhoneOS.sdk
-          else
-            echo "No Xcode SDK found"
-            exit 1
-          fi
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+          echo "THEOS: $THEOS"
 
-      - name: Build Tweak
-        run: |
-          export THEOS=$HOME/theos
-          cd ios/UNMHook
-          make clean
-          make package FINALPACKAGE=1
+          mkdir -p build
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: UNMHook-deb
-          path: ios/UNMHook/packages/*.deb
+          # logos.pl preprocesses %hook/%orig Logos syntax -> plain ObjC
+          # Then clang compiles to dylib
+          "$THEOS/bin/logos" ios/UNMHook/Tweak.x > build/Tweak.mm 2>/dev/null || \
+          perl "$THEOS/bin/logos.pl" ios/UNMHook/Tweak.x > build/Tweak.mm
 
-      - name: Extract and upload dylib
-        run: |
-          cd ios/UNMHook
-          DEB_FILE=$(ls packages/*.deb | head -1)
-          if [ -n "$DEB_FILE" ]; then
-            mkdir -p extracted
-            dpkg-deb -x "$DEB_FILE" extracted/
-            DYLIB=$(find extracted -name "*.dylib" | head -1)
-            if [ -n "$DYLIB" ]; then
-              cp "$DYLIB" UNMHook.dylib
-              echo "DYLIB_PATH=ios/UNMHook/UNMHook.dylib" >> $GITHUB_ENV
-            fi
-          fi
+          echo "=== Preprocessed output (first 50 lines) ==="
+          head -50 build/Tweak.mm
+
+          # Compile the preprocessed .mm to dylib
+          clang++ \
+            -dynamiclib \
+            -arch arm64 \
+            -isysroot "$SDK" \
+            -framework Foundation \
+            -framework UIKit \
+            -fobjc-arc \
+            -fmodules \
+            -std=c++17 \
+            -I"$THEOS/vendor/include" \
+            -I"$THEOS/include" \
+            -install_name "@r/libUNMHook.dylib" \
+            -o build/UNMHook.dylib \
+            build/Tweak.mm
+
+          echo "Build successful!"
+          file build/UNMHook.dylib
+          ls -la build/UNMHook.dylib
 
       - name: Upload dylib artifact
         uses: actions/upload-artifact@v4
         with:
           name: UNMHook-dylib
-          path: ios/UNMHook/UNMHook.dylib
+          path: build/UNMHook.dylib
+
+      - name: Copy dylib for release
+        run: cp build/UNMHook.dylib ios/UNMHook/UNMHook.dylib
 
       - name: Create Release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -100,11 +96,10 @@ jobs:
             3. Kill and restart 网易云音乐
             
             ### Jailbreak
-            1. Download `UNMHook-*.deb`
-            2. Install via Sileo/Filza: `dpkg -i UNMHook_*.deb`
-            3. Kill app: `killall NeteaseMusic`
-          files: |
-            ios/UNMHook/packages/*.deb
-            ios/UNMHook/UNMHook.dylib
+            1. Download `UNMHook.dylib`
+            2. Copy to /Library/MobileSubstrate/DynamicLibraries/ on device
+            3. Copy UNMHook.plist alongside
+            4. Kill app: `killall NeteaseMusic`
+          files: build/UNMHook.dylib
           draft: false
           prerelease: false

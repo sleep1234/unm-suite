@@ -7,8 +7,14 @@ import com.raincat.dolby_beta.model.NeteaseSongListBean;
 import com.raincat.dolby_beta.net.Http;
 import com.raincat.dolby_beta.utils.NeteaseAES2;
 
+import de.robv.android.xposed.XposedBridge;
+
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Random;
@@ -26,9 +32,78 @@ import java.util.regex.Pattern;
 
 public class EAPIHelper {
     private static final Gson gson = new Gson();
+    private static final String GD_API_BASE = "https://music-api.gdstudio.xyz/api.php";
+    private static final long CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+    // GD API URL 缓存: songId -> {url, timestamp}
+    private static final HashMap<Long, CachedUrl> gdUrlCache = new HashMap<>();
+
+    private static class CachedUrl {
+        final String url;
+        final long timestamp;
+        CachedUrl(String url) { this.url = url; this.timestamp = System.currentTimeMillis(); }
+        boolean isExpired() { return System.currentTimeMillis() - timestamp > CACHE_TTL_MS; }
+    }
 
     /**
-     * 解除下载加密
+     * 通过 GD Studio API 获取歌曲的完整播放 URL（带缓存）
+     */
+    public static String fetchUrlFromGD(long songId, int br) {
+        // 检查缓存
+        synchronized (gdUrlCache) {
+            CachedUrl cached = gdUrlCache.get(songId);
+            if (cached != null && !cached.isExpired()) {
+                return cached.url;
+            }
+        }
+        try {
+            String apiUrl = GD_API_BASE + "?types=url&source=netease&id=" + songId + "&br=" + br;
+            URL url = new URL(apiUrl);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setRequestMethod("GET");
+
+            int responseCode = conn.getResponseCode();
+            if (responseCode != 200) {
+                XposedBridge.log("[dolby_beta] GD API returned HTTP " + responseCode);
+                return null;
+            }
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line);
+            }
+            reader.close();
+            conn.disconnect();
+
+            String json = sb.toString();
+            if (json.contains("\"url\"") && json.contains("\"http")) {
+                org.json.JSONObject obj = new org.json.JSONObject(json);
+                String fetchedUrl = obj.getString("url");
+                int fetchedBr = obj.optInt("br", 0);
+                int fetchedSize = obj.optInt("size", 0);
+
+                if (fetchedUrl != null && fetchedUrl.startsWith("http")) {
+                    XposedBridge.log("[dolby_beta] GD API success for song " + songId + ": br=" + fetchedBr + " size=" + fetchedSize);
+                    synchronized (gdUrlCache) {
+                        gdUrlCache.put(songId, new CachedUrl(fetchedUrl));
+                    }
+                    return fetchedUrl;
+                }
+            }
+            XposedBridge.log("[dolby_beta] GD API response has no valid URL for song " + songId);
+            return null;
+        } catch (Exception e) {
+            XposedBridge.log("[dolby_beta] GD API error for song " + songId + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 解除下载加密 — 增强版：对试听片段调用 GD API 获取完整 URL
      */
     public static String modifyPlayer(String original) {
         NeteaseSongListBean listBean = gson.fromJson(original, NeteaseSongListBean.class);
@@ -40,12 +115,37 @@ public class EAPIHelper {
             //flag与8非0为云盘歌曲
             if ((dataBean.getFlag() & 0x8) == 0) {
 
+                // 记录原始 fee，用于判断是否需要替换 URL
+                int originalFee = dataBean.getFee();
+                boolean hadFreeTrial = dataBean.getFreeTrialInfo() != null;
+
                 dataBean.setFee(0);
                 dataBean.setFlag(0);
                 dataBean.setPayed(0);
                 dataBean.setFreeTrialInfo(null);
-                if (dataBean.getUrl() != null && dataBean.getUrl().contains("?"))
-                    dataBean.setUrl(dataBean.getUrl().substring(0, dataBean.getUrl().indexOf("?")));
+
+                String currentUrl = dataBean.getUrl();
+                if (currentUrl != null) {
+                    // 去掉 query string
+                    if (currentUrl.contains("?")) {
+                        currentUrl = currentUrl.substring(0, currentUrl.indexOf("?"));
+                        dataBean.setUrl(currentUrl);
+                    }
+
+                    // 仅对 VIP 歌曲（原始 fee > 0 或有试听标记）调用 GD API 替换 URL
+                    // 免费/无试听的歌曲保留原始 URL（避免降低音质）
+                    if (originalFee > 0 || hadFreeTrial) {
+                        String gdUrl = fetchUrlFromGD(dataBean.getId(), 999);
+                        if (gdUrl != null) {
+                            dataBean.setUrl(gdUrl);
+                            dataBean.setBr(999);
+                            dataBean.setSize(0);
+                            dataBean.setType("flac");
+                            dataBean.setLevel("lossless");
+                            dataBean.setCode(200);
+                        }
+                    }
+                }
             }
             modifyListBean.getData().add(dataBean);
         }

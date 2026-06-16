@@ -223,6 +223,8 @@ public class FileHelper {
 
     /**
      * 解压整个zip
+     * 修复：zip条目可能使用反斜杠路径(Windows创建的zip)，需要规范化为正斜杠，
+     * 否则目录层级无法正确创建，导致文件变成带反斜杠的扁平文件名。
      */
     public static boolean unzipFiles(String zipFileString, String outPathString) {
         try {
@@ -234,17 +236,23 @@ public class FileHelper {
             ZipFile zipFile = new ZipFile(zipFileString);
             Enumeration<? extends ZipEntry> e = zipFile.entries();
             ZipEntry entry;
-            String szName = "";
             while (e.hasMoreElements()) {
                 entry = e.nextElement();
-                if (entry.isDirectory()) {
-                    szName = entry.getName();
-                    szName = szName.substring(0, szName.length() - 1);
-                    File folder = new File(outPathString + File.separator + szName);
+                // Normalize backslashes to forward slashes (Windows-created zips)
+                String entryName = entry.getName().replace('\\', '/');
+                if (entryName.endsWith("/")) {
+                    // Directory entry
+                    String dirName = entryName.substring(0, entryName.length() - 1);
+                    File folder = new File(outPathString + "/" + dirName);
                     folder.mkdirs();
                 } else {
+                    // File entry — ensure parent directories exist
+                    File dstFile = new File(outPathString + "/" + entryName);
+                    File parentDir = dstFile.getParentFile();
+                    if (parentDir != null && !parentDir.exists()) {
+                        parentDir.mkdirs();
+                    }
                     InputStream is = zipFile.getInputStream(entry);
-                    File dstFile = new File(outPathString + "/" + entry.getName());
                     FileOutputStream fos = new FileOutputStream(dstFile);
                     int len;
                     byte[] buffer = new byte[8192];

@@ -191,7 +191,7 @@ static BOOL isTargetPath(NSString *path) {
 // 是否是音乐相关请求（更宽泛的匹配，用于调试日志）
 static BOOL isMusicRelated(NSString *path) {
     if (!path) return NO;
-    NSArray *keywords = @[@"song", @"player", "/music/", "enhance", "download/url", "eapi"];
+    NSArray *keywords = @[@"song", @"player", @"/music/", @"enhance", @"download/url", @"eapi"];
     for (NSString *kw in keywords) {
         if ([path containsString:kw]) return YES;
     }

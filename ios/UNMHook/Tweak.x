@@ -99,27 +99,59 @@ static NSString *fetchMusicURL(NSInteger songId) {
 // ============ 音源注入 ============
 
 static BOOL injectMusicURLIntoDict(NSMutableDictionary *songDict) {
-    id urlObj = songDict[@"url"];
-    NSNumber *fee = songDict[@"fee"];
     NSNumber *songId = songDict[@"id"];
-
-    BOOL needInject = NO;
-    if ((!urlObj || [urlObj isKindOfClass:[NSNull class]] ||
-         ([urlObj isKindOfClass:[NSString class]] && [(NSString *)urlObj length] == 0))) {
-        needInject = YES;
-    }
-    if (fee && [fee integerValue] == 1) {
-        needInject = YES;
-    }
-
-    if (!needInject || !songId) {
+    if (!songId || [songId integerValue] <= 0) {
         return NO;
     }
 
     NSInteger sid = [songId integerValue];
-    if (sid <= 0) return NO;
 
-    UNMLog(@"Song %ld needs URL injection", (long)sid);
+    // 判断是否需要注入：只要是 VIP/试听/无 URL 都注入
+    id urlObj = songDict[@"url"];
+    NSNumber *fee = songDict[@"fee"];
+    NSNumber *pl = songDict[@"pl"];
+
+    BOOL needInject = NO;
+
+    // 1. URL 为空/null
+    if (!urlObj || [urlObj isKindOfClass:[NSNull class]] ||
+        ([urlObj isKindOfClass:[NSString class]] && [(NSString *)urlObj length] == 0)) {
+        needInject = YES;
+    }
+    // 2. fee 标记为 VIP（1=VIP, 4=购买专辑）
+    if (fee && ([fee integerValue] == 1 || [fee integerValue] == 4)) {
+        needInject = YES;
+    }
+    // 3. pl（可播放码率）为 0 或很小，说明无法完整播放
+    if (pl && [pl integerValue] <= 0) {
+        needInject = YES;
+    }
+
+    if (!needInject) {
+        // 即使有 URL，也可能是试听片段（30s），检查码率
+        // 试听片段通常 br 很低或 size 很小
+        NSNumber *br = songDict[@"br"];
+        NSNumber *size = songDict[@"size"];
+        NSString *urlStr = (urlObj && [urlObj isKindOfClass:[NSString class]]) ? (NSString *)urlObj : nil;
+
+        // 如果 URL 包含试听标记，或者 br/size 异常小
+        if (urlStr && [urlStr containsString:@"trial"]) {
+            needInject = YES;
+        }
+        if (br && [br integerValue] > 0 && [br integerValue] < 128000) {
+            // 码率低于 128k，可能是试听
+            needInject = YES;
+        }
+    }
+
+    if (!needInject) {
+        return NO;
+    }
+
+    UNMLog(@"Song %ld needs URL injection (fee=%@, url=%@, br=%@, pl=%@)", 
+           (long)sid, fee, 
+           (urlObj && [urlObj isKindOfClass:[NSString class]]) ? urlObj : @"(nil)",
+           songDict[@"br"], pl);
 
     NSString *musicUrl = fetchMusicURL(sid);
     if (musicUrl && musicUrl.length > 0) {
@@ -130,6 +162,7 @@ static BOOL injectMusicURLIntoDict(NSMutableDictionary *songDict) {
         songDict[@"fee"] = @0;
         songDict[@"pl"] = @320000;
         songDict[@"dl"] = @320000;
+        songDict[@"flag"] = @0;
         return YES;
     }
 
@@ -169,6 +202,23 @@ static IMP orig_dataTaskWithRequest_completionHandler = NULL;
 
     UNMLog(@"Intercepting player URL request: %@", path);
 
+    // 调试：弹窗显示拦截到的请求路径
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"UNMHook 拦截"
+            message:[NSString stringWithFormat:@"请求路径:\n%@", path]
+            preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertAction *ok = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
+        [alert addAction:ok];
+
+        UIWindowScene *scene = nil;
+        for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) { scene = s; break; }
+        UIViewController *rootVC = nil;
+        if (scene) { for (UIWindow *w in scene.windows) { if (w.isKeyWindow) { rootVC = w.rootViewController; break; } } }
+        while (rootVC.presentedViewController) { rootVC = rootVC.presentedViewController; }
+        if (rootVC) { [rootVC presentViewController:alert animated:YES completion:nil]; }
+    });
+
     void (^newCompletionHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || !data) {
             completionHandler(data, response, error);
@@ -184,6 +234,30 @@ static IMP orig_dataTaskWithRequest_completionHandler = NULL;
                 BOOL modified = NO;
 
                 if ([dataDict isKindOfClass:[NSDictionary class]]) {
+                    // 调试：弹窗显示原始响应关键字段
+                    NSNumber *origFee = dataDict[@"fee"];
+                    NSNumber *origBr = dataDict[@"br"];
+                    NSNumber *origPl = dataDict[@"pl"];
+                    NSString *origUrl = dataDict[@"url"];
+                    if (origUrl && ![origUrl isKindOfClass:[NSString class]]) origUrl = @"(not string)";
+                    NSString *debugInfo = [NSString stringWithFormat:@"id=%@\nfee=%@\nbr=%@\npl=%@\nurl=%@",
+                        dataDict[@"id"], origFee, origBr, origPl,
+                        origUrl ? [origUrl substringToIndex:MIN(80, [origUrl length])] : @"(nil)"];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        UIAlertController *alert = [UIAlertController
+                            alertControllerWithTitle:@"UNMHook 原始响应"
+                            message:debugInfo
+                            preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertAction *ok = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
+                        [alert addAction:ok];
+                        UIWindowScene *scene = nil;
+                        for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) { scene = s; break; }
+                        UIViewController *rootVC = nil;
+                        if (scene) { for (UIWindow *w in scene.windows) { if (w.isKeyWindow) { rootVC = w.rootViewController; break; } } }
+                        while (rootVC.presentedViewController) { rootVC = rootVC.presentedViewController; }
+                        if (rootVC) { [rootVC presentViewController:alert animated:YES completion:nil]; }
+                    });
+
                     modified = injectMusicURLIntoDict(dataDict) || modified;
                 } else if ([dataDict isKindOfClass:[NSArray class]]) {
                     NSMutableArray *mutableArray = [(NSArray *)dataDict mutableCopy];

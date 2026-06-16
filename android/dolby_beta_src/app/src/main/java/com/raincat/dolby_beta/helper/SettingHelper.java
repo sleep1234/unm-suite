@@ -93,11 +93,11 @@ public class SettingHelper {
 
     public static final String http_proxy_key = "β_http_proxy_key";
     public static final String http_proxy_title = "代理服务器";
-    public static final String http_proxy_default = "www.zhp0104.fun";
+    public static final String http_proxy_default = "127.0.0.1";
 
     public static final String proxy_port_key = "β_proxy_port_key";
     public static final String proxy_port_title = "代理端口（1~65535）";
-    public static final int proxy_port_default = 18080;
+    public static final int proxy_port_default = 23338;
 
     public static final String proxy_original_key = "β_proxy_original_key";
     public static final String proxy_original_title = "代理源（空格隔开）";
@@ -175,7 +175,7 @@ public class SettingHelper {
         settingMap.put(sign_song_key, sharedPreferences.getBoolean(sign_song_key, false));
 
         settingMap.put(proxy_master_key, sharedPreferences.getBoolean(proxy_master_key, true));
-        settingMap.put(proxy_server_key, sharedPreferences.getBoolean(proxy_server_key, true));
+        settingMap.put(proxy_server_key, sharedPreferences.getBoolean(proxy_server_key, false));
         settingMap.put(proxy_priority_key, sharedPreferences.getBoolean(proxy_priority_key, false));
         settingMap.put(proxy_flac_key, sharedPreferences.getBoolean(proxy_flac_key, false));
         settingMap.put(proxy_gray_key, sharedPreferences.getBoolean(proxy_gray_key, false));

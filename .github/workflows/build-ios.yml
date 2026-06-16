@@ -23,28 +23,49 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Build dylib with Theos/Logos
+      - name: Install Theos (logos preprocessor only)
         run: |
-          # Install Theos (we only need the logos preprocessor + substrate headers)
-          export THEOS=$(mktemp -d)/theos
-          git clone --depth 1 https://github.com/theos/theos.git "$THEOS"
-          export PATH="$THEOS/bin:$PATH"
+          # We need Theos for the logos preprocessor (%hook/%orig/%ctor syntax)
+          export THEOS=/Users/runner/theos
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS" 2>&1 | tail -5
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          # Verify logos.pl exists
+          ls -la "$THEOS/bin/logos.pl" 2>/dev/null || echo "logos.pl not found"
+          find "$THEOS" -name "logos*" -type f 2>/dev/null | head -10
 
+      - name: Preprocess Logos and Build dylib
+        run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          THEOS=/Users/runner/theos
+          mkdir -p build
+
           echo "SDK: $SDK"
           echo "THEOS: $THEOS"
 
-          mkdir -p build
+          # Find and run logos preprocessor
+          LOGOS_BIN=$(find "$THEOS" -name "logos.pl" -type f 2>/dev/null | head -1)
+          echo "Logos binary: $LOGOS_BIN"
 
-          # logos.pl preprocesses %hook/%orig Logos syntax -> plain ObjC
-          # Then clang compiles to dylib
-          "$THEOS/bin/logos" ios/UNMHook/Tweak.x > build/Tweak.mm 2>/dev/null || \
-          perl "$THEOS/bin/logos.pl" ios/UNMHook/Tweak.x > build/Tweak.mm
+          if [ -z "$LOGOS_BIN" ]; then
+            echo "FATAL: logos.pl not found in Theos"
+            find "$THEOS/bin" -type f | head -20
+            exit 1
+          fi
 
-          echo "=== Preprocessed output (first 50 lines) ==="
-          head -50 build/Tweak.mm
+          # Preprocess Tweak.x -> Tweak.mm
+          perl "$LOGOS_BIN" ios/UNMHook/Tweak.x > build/Tweak.mm 2>&1
+          LOGOS_EXIT=$?
+          echo "Logos exit code: $LOGOS_EXIT"
+          echo "=== Output (last 30 lines) ==="
+          tail -30 build/Tweak.mm
+          wc -l build/Tweak.mm
 
-          # Compile the preprocessed .mm to dylib
+          if [ $LOGOS_EXIT -ne 0 ] || [ ! -s build/Tweak.mm ]; then
+            echo "Logos preprocessing failed!"
+            exit 1
+          fi
+
+          # Compile to dylib
           clang++ \
             -dynamiclib \
             -arch arm64 \
@@ -54,13 +75,11 @@ jobs:
             -fobjc-arc \
             -fmodules \
             -std=c++17 \
-            -I"$THEOS/vendor/include" \
-            -I"$THEOS/include" \
             -install_name "@r/libUNMHook.dylib" \
             -o build/UNMHook.dylib \
-            build/Tweak.mm
+            build/Tweak.mm 2>&1
 
-          echo "Build successful!"
+          echo "=== Build result ==="
           file build/UNMHook.dylib
           ls -la build/UNMHook.dylib
 
@@ -69,9 +88,6 @@ jobs:
         with:
           name: UNMHook-dylib
           path: build/UNMHook.dylib
-
-      - name: Copy dylib for release
-        run: cp build/UNMHook.dylib ios/UNMHook/UNMHook.dylib
 
       - name: Create Release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -82,24 +98,16 @@ jobs:
           body: |
             UNMHook v2.0.0 - Native music URL injection, no Node.js/proxy needed.
             
-            ## What's New
-            - Completely rewritten from proxy mode to native ObjC hook
-            - Hooks NSURLSession to intercept player URL responses
-            - Queries GD studio API (pyncmd source) for grayed-out songs
-            - Injects real music URL directly into response JSON
-            - No external dependencies - pure native implementation
-            
             ## Installation
             ### TrollStore (recommended)
-            1. Download `UNMHook.dylib`
-            2. Use TrollStore Helper or inserttool to inject into 网易云音乐
-            3. Kill and restart 网易云音乐
+            1. Download UNMHook.dylib
+            2. Use inject tool to inject into NeteaseMusic
+            3. Kill and restart the app
             
             ### Jailbreak
-            1. Download `UNMHook.dylib`
-            2. Copy to /Library/MobileSubstrate/DynamicLibraries/ on device
-            3. Copy UNMHook.plist alongside
-            4. Kill app: `killall NeteaseMusic`
+            1. Copy UNMHook.dylib to /Library/MobileSubstrate/DynamicLibraries/
+            2. Copy UNMHook.plist alongside
+            3. killall NeteaseMusic
           files: build/UNMHook.dylib
           draft: false
           prerelease: false

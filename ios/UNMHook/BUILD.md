@@ -3,60 +3,66 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'b265e160-9dad-48d8-8f76-8a7425ed8688'
-  PropagateID: 'b265e160-9dad-48d8-8f76-8a7425ed8688'
-  ReservedCode1: '87c5e95f-4ebf-4d8a-bada-fd590a044f8d'
-  ReservedCode2: '87c5e95f-4ebf-4d8a-bada-fd590a044f8d'
+  ProduceID: '67ca17d5-28e6-433f-921d-e4b622173a21'
+  PropagateID: '67ca17d5-28e6-433f-921d-e4b622173a21'
+  ReservedCode1: 'befb7a52-8cee-4ddd-a474-2f226014e8cf'
+  ReservedCode2: 'befb7a52-8cee-4ddd-a474-2f226014e8cf'
 ---
 
 # UNMHook - iOS 编译指南
 
 ## 前置条件
 
-- macOS (或 Linux + Theos)
-- Theos 已安装 (`sudo install_theos.sh`)
-- iOS SDK 15.0+
-- Xcode Command Line Tools
+- macOS + Xcode Command Line Tools（或 GitHub Actions CI）
+- iOS SDK 14.0+
+- **无需 Theos、Logos、CydiaSubstrate** — 纯 ObjC + objc/runtime 实现
 
 ## 编译步骤
 
 ```bash
-# 1. 设置 Theos 环境变量
-export THEOS=~/theos
-
-# 2. 修改配置
-# 编辑 Tweak.x 顶部的配置区域：
-# - PROXY_HOST: 改为你的 NAS IP 或域名
-# - PROXY_HTTP_PORT / PROXY_HTTPS_PORT: 改为 UNM 服务端口
-# - WORK_MODE: 0=代理模式（推荐），1=URL重写模式
-
-# 3. 编译
-cd UNMHook
-make clean && make package
-
-# 编译产物在 packages/ 目录下
+# 一行命令编译（无需 Theos）
+clang++ \
+  -dynamiclib \
+  -arch arm64 \
+  -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+  -miphoneos-version-min=14.0 \
+  -framework Foundation \
+  -framework UIKit \
+  -fobjc-arc \
+  -fmodules \
+  -std=c++17 \
+  -install_name "@rpath/libUNMHook.dylib" \
+  -o UNMHook.dylib \
+  Tweak.x
 ```
+
+## 修改配置
+
+编辑 `Tweak.x` 顶部配置区域：
+- `MUSIC_API_URL`: 音源 API 地址（默认 GD studio）
+- `BITRATE`: 码率，999=FLAC, 320=320kbps, 128=128kbps
 
 ## 部署方式
 
 ### 方式1：巨魔（TrollStore）
-```bash
-# 1. 将 .deb 解压获取 dylib
-dpkg-deb -x com.unm.unmhook_1.0.0_iphoneos-arm.deb unm-extract/
-cp unm-extract/Library/MobileSubstrate/DynamicLibraries/UNMHook.dylib .
-
-# 2. 使用 TrollStore Helper 注入到网易云音乐
-# 或者直接在 IPA 中注入 dylib 后通过 TrollStore 安装
+```
+1. 下载 UNMHook.dylib
+2. 使用 inject 工具注入到网易云音乐 .ipa
+3. 通过 TrollStore 安装修改后的 .ipa
+4. 杀掉并重启网易云音乐
 ```
 
-### 方式2：越狱
-```bash
-# 直接安装 deb
-dpkg -i com.unm.unmhook_1.0.0_iphoneos-arm.deb
-
-# 重启网易云音乐
-killall NeteaseMusic
+### 方式2：越狱（Dopamine / unc0ver）
 ```
+1. 复制 UNMHook.dylib 到 /Library/MobileSubstrate/DynamicLibraries/
+2. 复制 UNMHook.plist 到同一目录
+3. killall NeteaseMusic
+```
+
+## CI 构建
+
+推送到 `main` 分支的 `ios/**` 路径变更会自动触发 GitHub Actions 编译。
+编译产物会上传为 artifact 并创建 GitHub Release。
 
 ## 调试
 
@@ -68,11 +74,20 @@ idevicesyslog | grep UNMHook
 # 或通过 Console.app 过滤 UNMHook
 ```
 
+## 架构说明
+
+| 组件 | 技术 |
+|------|------|
+| 方法 Hook | `method_exchangeImplementations` (objc/runtime) |
+| 同步 HTTP | `NSURLSession` + `dispatch_semaphore_t` |
+| JSON 解析 | `NSJSONSerialization` |
+| 初始化 | `__attribute__((constructor))` |
+
 ## 故障排除
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| 音乐仍然灰色 | 代理未生效 | 检查 PROXY_HOST 和端口配置 |
-| 网络连接失败 | HTTPS 证书信任问题 | 确认 NAS 已部署 UNM 并启用 HTTPS |
+| 音乐仍然灰色 | Hook 未生效 | 检查日志中是否出现 "Hook installed" |
+| 网络连接失败 | API 不可用 | 检查 MUSIC_API_URL 是否可达 |
 | APP 闪退 | dylib 注入失败 | 检查架构是否匹配（arm64） |
-| 部分歌曲无法解锁 | 音源匹配失败 | UNM 服务端日志排查 |
+| 部分歌曲无法解锁 | 音源匹配失败 | 查看 UNMHook 日志中的 API 返回 |

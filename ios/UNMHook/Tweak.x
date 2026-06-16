@@ -1,7 +1,8 @@
 /**
- * UNMHook v2.1.0 - Debug Build
- * Hook ALL NSURLSession dataTask methods, log every request URL to file,
- * and show popup for any music-related requests.
+ * UNMHook v2.2.0 - Debug Build
+ * Hook ALL NSURLSession dataTask methods (with AND without completionHandler)
+ * + Hook delegate callback methods
+ * + Log every request URL to file
  */
 
 #import <Foundation/Foundation.h>
@@ -20,7 +21,6 @@ static void UNMLog(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
     NSLog(@"[UNMHook] %@", message);
-    // Also write to file
     NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
         [NSDateFormatter localizedStringFromDate:[NSDate date]
                                         dateStyle:NSDateFormatterNoStyle
@@ -36,29 +36,19 @@ static void UNMLog(NSString *format, ...) {
     }
 }
 
-// 弹窗辅助函数
 static void showAlert(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:title
-            message:message
+            alertControllerWithTitle:title message:message
             preferredStyle:UIAlertControllerStyleAlert];
         UIAlertAction *ok = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
         [alert addAction:ok];
-
         UIWindowScene *scene = nil;
         for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) { scene = s; break; }
         UIViewController *rootVC = nil;
-        if (scene) {
-            for (UIWindow *w in scene.windows) {
-                if (w.isKeyWindow) { rootVC = w.rootViewController; break; }
-            }
-        }
+        if (scene) { for (UIWindow *w in scene.windows) { if (w.isKeyWindow) { rootVC = w.rootViewController; break; } } }
         while (rootVC.presentedViewController) { rootVC = rootVC.presentedViewController; }
-        if (rootVC) { [rootVC presentViewController:alert animated:YES completion:nil];
-        } else {
-            UNMLog(@"WARN: Could not find rootVC for alert");
-        }
+        if (rootVC) { [rootVC presentViewController:alert animated:YES completion:nil]; }
     });
 }
 
@@ -76,7 +66,6 @@ static NSString *fetchMusicURL(NSInteger songId) {
     __block NSData *responseData = nil;
     __block NSError *responseError = nil;
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request
@@ -86,31 +75,22 @@ static NSString *fetchMusicURL(NSInteger songId) {
         dispatch_semaphore_signal(sema);
     }];
     [task resume];
-
     dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC));
 
     if (!responseData || responseError) {
         UNMLog(@"API request failed for song %ld: %@", (long)songId, responseError.localizedDescription);
         return nil;
     }
-
     NSError *jsonError = nil;
     id json = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&jsonError];
-    if (![json isKindOfClass:[NSDictionary class]]) {
-        UNMLog(@"API response not JSON for song %ld", (long)songId);
-        return nil;
-    }
-
+    if (![json isKindOfClass:[NSDictionary class]]) return nil;
     NSDictionary *dict = (NSDictionary *)json;
     NSNumber *br = dict[@"br"];
     NSString *musicUrl = dict[@"url"];
-
     if (br && [br integerValue] > 0 && musicUrl && musicUrl.length > 0) {
         UNMLog(@"Got music URL for song %ld, br=%ld", (long)songId, (long)[br integerValue]);
         return musicUrl;
     }
-
-    UNMLog(@"API returned empty/no-url for song %ld", (long)songId);
     return nil;
 }
 
@@ -119,35 +99,25 @@ static NSString *fetchMusicURL(NSInteger songId) {
 static BOOL injectMusicURLIntoDict(NSMutableDictionary *songDict) {
     NSNumber *songId = songDict[@"id"];
     if (!songId || [songId integerValue] <= 0) return NO;
-
     NSInteger sid = [songId integerValue];
     id urlObj = songDict[@"url"];
     NSNumber *fee = songDict[@"fee"];
     NSNumber *pl = songDict[@"pl"];
 
     BOOL needInject = NO;
-
     if (!urlObj || [urlObj isKindOfClass:[NSNull class]] ||
-        ([urlObj isKindOfClass:[NSString class]] && [(NSString *)urlObj length] == 0)) {
-        needInject = YES;
-    }
-    if (fee && ([fee integerValue] == 1 || [fee integerValue] == 4)) {
-        needInject = YES;
-    }
-    if (pl && [pl integerValue] <= 0) {
-        needInject = YES;
-    }
+        ([urlObj isKindOfClass:[NSString class]] && [(NSString *)urlObj length] == 0)) needInject = YES;
+    if (fee && ([fee integerValue] == 1 || [fee integerValue] == 4)) needInject = YES;
+    if (pl && [pl integerValue] <= 0) needInject = YES;
     if (!needInject) {
         NSNumber *br = songDict[@"br"];
         NSString *urlStr = (urlObj && [urlObj isKindOfClass:[NSString class]]) ? (NSString *)urlObj : nil;
         if (urlStr && [urlStr containsString:@"trial"]) needInject = YES;
         if (br && [br integerValue] > 0 && [br integerValue] < 128000) needInject = YES;
     }
-
     if (!needInject) return NO;
 
-    UNMLog(@"Song %ld needs URL injection (fee=%@, br=%@, pl=%@)", (long)sid, fee, songDict[@"br"], pl);
-
+    UNMLog(@"Song %ld needs injection (fee=%@, br=%@, pl=%@)", (long)sid, fee, songDict[@"br"], pl);
     NSString *musicUrl = fetchMusicURL(sid);
     if (musicUrl && musicUrl.length > 0) {
         songDict[@"url"] = musicUrl;
@@ -163,209 +133,153 @@ static BOOL injectMusicURLIntoDict(NSMutableDictionary *songDict) {
     return NO;
 }
 
-// ============ Hook ALL NSURLSession dataTask 方法 ============
+// ============ Hook NSURLSession (4个 dataTask 方法) ============
 
-static IMP orig_dataTaskWithRequest_completionHandler = NULL;
-static IMP orig_dataTaskWithURL_completionHandler = NULL;
+static IMP orig_req_ch = NULL;  // dataTaskWithRequest:completionHandler:
+static IMP orig_url_ch = NULL;  // dataTaskWithURL:completionHandler:
+static IMP orig_req    = NULL;  // dataTaskWithRequest: (no completionHandler - delegate mode)
+static IMP orig_url    = NULL;  // dataTaskWithURL: (no completionHandler - delegate mode)
 
 @interface NSURLSession (UNMHook)
-- (NSURLSessionDataTask *)unm_dataTaskWithRequest:(NSURLRequest *)request
-                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler;
-- (NSURLSessionDataTask *)unm_dataTaskWithURL:(NSURL *)url
-                             completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler;
+- (NSURLSessionDataTask *)unm_req_ch:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))handler;
+- (NSURLSessionDataTask *)unm_url_ch:(NSURL *)url completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))handler;
+- (NSURLSessionDataTask *)unm_req:(NSURLRequest *)request;
+- (NSURLSessionDataTask *)unm_url:(NSURL *)url;
 @end
+
+static BOOL isMusicRelated(NSString *path) {
+    if (!path) return NO;
+    NSArray *kw = @[@"song", @"player", @"enhance", @"download/url", @"eapi", @"music"];
+    for (NSString *k in kw) { if ([path containsString:k]) return YES; }
+    return NO;
+}
+
+static void processResponse(NSData *data, NSURLResponse *response, NSError *error,
+                            void (^handler)(NSData *, NSURLResponse *, NSError *), NSString *path) {
+    if (error || !data) { handler(data, response, error); return; }
+    @try {
+        NSError *pe = nil;
+        id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&pe];
+        if (![json isKindOfClass:[NSDictionary class]]) { handler(data, response, error); return; }
+
+        NSMutableDictionary *mj = [(NSDictionary *)json mutableCopy];
+        NSMutableDictionary *dd = mj[@"data"];
+        BOOL mod = NO;
+
+        if ([dd isKindOfClass:[NSDictionary class]]) {
+            NSNumber *f = dd[@"fee"], *b = dd[@"br"], *p = dd[@"pl"];
+            NSString *u = dd[@"url"];
+            if (u && ![u isKindOfClass:[NSString class]]) u = @"(not str)";
+            NSString *preview = u ? [(NSString *)u substringToIndex:MIN(60, [(NSString *)u length])] : @"(nil)";
+            showAlert(@"UNMHook 响应", [NSString stringWithFormat:@"%@\nid=%@ fee=%@ br=%@ pl=%@\nurl=%@",
+                path, dd[@"id"], f, b, p, preview]);
+            mod = injectMusicURLIntoDict(dd) || mod;
+        } else if ([dd isKindOfClass:[NSArray class]]) {
+            NSMutableArray *ma = [(NSArray *)dd mutableCopy];
+            for (NSUInteger i = 0; i < ma.count; i++) {
+                if ([ma[i] isKindOfClass:[NSDictionary class]]) {
+                    NSMutableDictionary *sd = [(NSDictionary *)ma[i] mutableCopy];
+                    if (injectMusicURLIntoDict(sd)) { ma[i] = sd; mod = YES; }
+                }
+            }
+            mj[@"data"] = ma;
+        }
+        if (mod) {
+            NSData *nd = [NSJSONSerialization dataWithJSONObject:mj options:0 error:nil];
+            if (nd) { handler(nd, response, nil); return; }
+        }
+    } @catch (NSException *e) {
+        UNMLog(@"Error: %@", e.reason);
+    }
+    handler(data, response, error);
+}
 
 @implementation NSURLSession (UNMHook)
 
-// 是否是需要拦截的 API
-static BOOL isTargetPath(NSString *path) {
-    if (!path) return NO;
-    NSArray *keywords = @[@"song/enhance/player", @"song/enhance/download",
-                          @"song/enhance", @"player/url", @"download/url"];
-    for (NSString *kw in keywords) {
-        if ([path containsString:kw]) return YES;
-    }
-    return NO;
-}
-
-// 是否是音乐相关请求（更宽泛的匹配，用于调试日志）
-static BOOL isMusicRelated(NSString *path) {
-    if (!path) return NO;
-    NSArray *keywords = @[@"song", @"player", @"/music/", @"enhance", @"download/url", @"eapi"];
-    for (NSString *kw in keywords) {
-        if ([path containsString:kw]) return YES;
-    }
-    return NO;
-}
-
-// 处理拦截到的响应数据
-static void processResponseData(NSData *data, NSURLResponse *response, NSError *error,
-                                 void (^completionHandler)(NSData *, NSURLResponse *, NSError *),
-                                 NSString *requestPath) {
-    if (error || !data) {
-        completionHandler(data, response, error);
-        return;
-    }
-
-    @try {
-        NSError *parseError = nil;
-        id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
-        if (![json isKindOfClass:[NSDictionary class]]) {
-            completionHandler(data, response, error);
-            return;
-        }
-
-        NSMutableDictionary *mutableJson = [(NSDictionary *)json mutableCopy];
-        NSMutableDictionary *dataDict = mutableJson[@"data"];
-        BOOL modified = NO;
-
-        if ([dataDict isKindOfClass:[NSDictionary class]]) {
-            // 调试弹窗：显示原始响应
-            NSNumber *origFee = dataDict[@"fee"];
-            NSNumber *origBr = dataDict[@"br"];
-            NSNumber *origPl = dataDict[@"pl"];
-            NSString *origUrl = dataDict[@"url"];
-            if (origUrl && ![origUrl isKindOfClass:[NSString class]]) origUrl = @"(not string)";
-            NSString *origId = [NSString stringWithFormat:@"%@", dataDict[@"id"]];
-            NSString *urlPreview = origUrl ? [(NSString *)origUrl substringToIndex:MIN(60, [(NSString *)origUrl length])] : @"(nil)";
-            NSString *debugInfo = [NSString stringWithFormat:@"path=%@\nid=%@\nfee=%@\nbr=%@\npl=%@\nurl=%@",
-                requestPath, origId, origFee, origBr, origPl, urlPreview];
-            showAlert(@"UNMHook 拦截响应", debugInfo);
-
-            modified = injectMusicURLIntoDict(dataDict) || modified;
-        } else if ([dataDict isKindOfClass:[NSArray class]]) {
-            NSMutableArray *mutableArray = [(NSArray *)dataDict mutableCopy];
-            for (NSUInteger i = 0; i < mutableArray.count; i++) {
-                if ([mutableArray[i] isKindOfClass:[NSDictionary class]]) {
-                    NSMutableDictionary *songDict = [(NSDictionary *)mutableArray[i] mutableCopy];
-                    if (injectMusicURLIntoDict(songDict)) {
-                        mutableArray[i] = songDict;
-                        modified = YES;
-                    }
-                }
-            }
-            mutableJson[@"data"] = mutableArray;
-        }
-
-        if (modified) {
-            NSData *newData = [NSJSONSerialization dataWithJSONObject:mutableJson options:0 error:nil];
-            if (newData) {
-                UNMLog(@"Response modified - injected music URLs for %@", requestPath);
-                completionHandler(newData, response, nil);
-                return;
-            }
-        }
-    } @catch (NSException *exception) {
-        UNMLog(@"Error processing response: %@", exception.reason);
-    }
-
-    completionHandler(data, response, error);
-}
-
-- (NSURLSessionDataTask *)unm_dataTaskWithRequest:(NSURLRequest *)request
-                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+- (NSURLSessionDataTask *)unm_req_ch:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))handler {
     NSString *path = request.URL.path;
-
-    // 记录所有请求
-    UNMLog(@"[REQ] %@", path);
-
-    // 对音乐相关请求弹窗
+    UNMLog(@"[REQ+CH] %@", path);
     if (isMusicRelated(path)) {
-        UNMLog(@"[MUSIC] %@", path);
-        showAlert(@"UNMHook 请求", [NSString stringWithFormat:@"%@", path]);
+        showAlert(@"UNMHook 请求", path);
     }
-
-    BOOL target = isTargetPath(path);
-    if (!target) {
-        return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))
-                orig_dataTaskWithRequest_completionHandler)(self, _cmd, request, completionHandler);
+    // 对目标路径包装 handler
+    if ([path containsString:@"song/enhance"] || [path containsString:@"player/url"] || [path containsString:@"download/url"]) {
+        UNMLog(@"[TARGET] %@", path);
+        void (^wh)(NSData *, NSURLResponse *, NSError *) = ^(NSData *d, NSURLResponse *r, NSError *e) {
+            processResponse(d, r, e, handler, path);
+        };
+        return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, id))orig_req_ch)(self, _cmd, request, wh);
     }
-
-    UNMLog(@"[TARGET] Intercepting: %@", path);
-
-    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        processResponseData(data, response, error, completionHandler, path);
-    };
-
-    return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))
-            orig_dataTaskWithRequest_completionHandler)(self, _cmd, request, wrappedHandler);
+    return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, id))orig_req_ch)(self, _cmd, request, handler);
 }
 
-- (NSURLSessionDataTask *)unm_dataTaskWithURL:(NSURL *)url
-                             completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+- (NSURLSessionDataTask *)unm_url_ch:(NSURL *)url completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))handler {
     NSString *path = url.path;
-
-    UNMLog(@"[REQ-URL] %@", path);
-
+    UNMLog(@"[URL+CH] %@", path);
     if (isMusicRelated(path)) {
-        UNMLog(@"[MUSIC-URL] %@", path);
-        showAlert(@"UNMHook 请求(URL)", [NSString stringWithFormat:@"%@", path]);
+        showAlert(@"UNMHook 请求(URL+CH)", path);
     }
+    return ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, id))orig_url_ch)(self, _cmd, url, handler);
+}
 
-    BOOL target = isTargetPath(path);
-    if (!target) {
-        return ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))
-                orig_dataTaskWithURL_completionHandler)(self, _cmd, url, completionHandler);
+- (NSURLSessionDataTask *)unm_req:(NSURLRequest *)request {
+    NSString *path = request.URL.path;
+    UNMLog(@"[REQ-DELEGATE] %@", path);
+    if (isMusicRelated(path)) {
+        UNMLog(@"[MUSIC-DELEGATE] %@", path);
+        showAlert(@"UNMHook Delegate请求", path);
     }
+    return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))orig_req)(self, _cmd, request);
+}
 
-    UNMLog(@"[TARGET-URL] Intercepting: %@", path);
-
-    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        processResponseData(data, response, error, completionHandler, path);
-    };
-
-    return ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))
-            orig_dataTaskWithURL_completionHandler)(self, _cmd, url, wrappedHandler);
+- (NSURLSessionDataTask *)unm_url:(NSURL *)url {
+    NSString *path = url.path;
+    UNMLog(@"[URL-DELEGATE] %@", path);
+    return ((NSURLSessionDataTask *(*)(id, SEL, NSURL *))orig_url)(self, _cmd, url);
 }
 
 @end
 
 // ============ 构造函数 ============
 
+static void swizzle(Class cls, SEL origSel, SEL newSel, IMP *origImp) {
+    Method om = class_getInstanceMethod(cls, origSel);
+    Method nm = class_getInstanceMethod(cls, newSel);
+    if (om && nm) {
+        *origImp = method_getImplementation(om);
+        method_exchangeImplementations(om, nm);
+        UNMLog(@"Hook OK: %@", NSStringFromSelector(origSel));
+    } else {
+        UNMLog(@"Hook SKIP: %@ (orig=%d, new=%d)", NSStringFromSelector(origSel), om!=nil, nm!=nil);
+    }
+}
+
 __attribute__((constructor)) static void UNMHookInit() {
-    // 清空日志文件
     [@"" writeToFile:LOG_FILE atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
     Class cls = [NSURLSession class];
 
-    // Hook 1: dataTaskWithRequest:completionHandler:
-    SEL sel1 = @selector(dataTaskWithRequest:completionHandler:);
-    SEL swiz1 = @selector(unm_dataTaskWithRequest:completionHandler:);
-    Method m1 = class_getInstanceMethod(cls, sel1);
-    Method sm1 = class_getInstanceMethod(cls, swiz1);
-    if (m1 && sm1) {
-        orig_dataTaskWithRequest_completionHandler = method_getImplementation(m1);
-        method_exchangeImplementations(m1, sm1);
-        UNMLog(@"Hook 1 installed: dataTaskWithRequest:completionHandler:");
-    } else {
-        UNMLog(@"ERROR: Hook 1 failed - methods not found");
-    }
+    // 带 completionHandler 的版本
+    swizzle(cls, @selector(dataTaskWithRequest:completionHandler:),
+            @selector(unm_req_ch:completionHandler:), &orig_req_ch);
+    swizzle(cls, @selector(dataTaskWithURL:completionHandler:),
+            @selector(unm_url_ch:completionHandler:), &orig_url_ch);
 
-    // Hook 2: dataTaskWithURL:completionHandler:
-    SEL sel2 = @selector(dataTaskWithURL:completionHandler:);
-    SEL swiz2 = @selector(unm_dataTaskWithURL:completionHandler:);
-    Method m2 = class_getInstanceMethod(cls, sel2);
-    Method sm2 = class_getInstanceMethod(cls, swiz2);
-    if (m2 && sm2) {
-        orig_dataTaskWithURL_completionHandler = method_getImplementation(m2);
-        method_exchangeImplementations(m2, sm2);
-        UNMLog(@"Hook 2 installed: dataTaskWithURL:completionHandler:");
-    } else {
-        UNMLog(@"WARN: Hook 2 - dataTaskWithURL:completionHandler: not found (may not exist on this OS)");
-    }
+    // 不带 completionHandler 的版本（delegate 模式）
+    swizzle(cls, @selector(dataTaskWithRequest:),
+            @selector(unm_req:), &orig_req);
+    swizzle(cls, @selector(dataTaskWithURL:),
+            @selector(unm_url:), &orig_url);
 
-    UNMLog(@"=== UNMHook v2.1.0 Debug Loaded ===");
-    UNMLog(@"Log file: %@", LOG_FILE);
+    UNMLog(@"=== UNMHook v2.2.0 Debug Loaded ===");
 
-    // 启动弹窗
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:@"UNMHook v2.1.0 Debug"
-            message:@"已加载！播放VIP歌曲时将弹窗显示请求信息。\n日志文件: /tmp/unmhook_debug.log"
+            alertControllerWithTitle:@"UNMHook v2.2.0"
+            message:@"已加载！Hook了4个dataTask方法(含delegate模式)。\n播放时看弹窗，日志: /tmp/unmhook_debug.log"
             preferredStyle:UIAlertControllerStyleAlert];
         UIAlertAction *ok = [UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil];
         [alert addAction:ok];
-
         UIWindowScene *scene = nil;
         for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) { scene = s; break; }
         UIViewController *rootVC = nil;

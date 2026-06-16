@@ -115,8 +115,7 @@ public class EAPIHelper {
             //flag与8非0为云盘歌曲
             if ((dataBean.getFlag() & 0x8) == 0) {
 
-                // 记录原始 fee，用于判断是否需要替换 URL
-                int originalFee = dataBean.getFee();
+                // 记录是否有试听标记，用于决定是否替换 URL
                 boolean hadFreeTrial = dataBean.getFreeTrialInfo() != null;
 
                 dataBean.setFee(0);
@@ -132,17 +131,13 @@ public class EAPIHelper {
                         dataBean.setUrl(currentUrl);
                     }
 
-                    // 仅对 VIP 歌曲（原始 fee > 0 或有试听标记）调用 GD API 替换 URL
-                    // 免费/无试听的歌曲保留原始 URL（避免降低音质）
-                    if (originalFee > 0 || hadFreeTrial) {
+                    // 仅对有试听标记的歌曲替换 URL（原逻辑已将 freeTrialInfo 置空，但 hadFreeTrial 之前已记录）
+                    // 不替换已有完整 VIP URL 的歌曲（用户可能有 VIP 账号）
+                    if (hadFreeTrial) {
                         String gdUrl = fetchUrlFromGD(dataBean.getId(), 999);
                         if (gdUrl != null) {
                             dataBean.setUrl(gdUrl);
-                            dataBean.setBr(999);
-                            dataBean.setSize(0);
-                            dataBean.setType("flac");
-                            dataBean.setLevel("lossless");
-                            dataBean.setCode(200);
+                            // 不修改 br/size/type 等元数据，避免与实际音频流不匹配导致播放器拒绝
                         }
                     }
                 }

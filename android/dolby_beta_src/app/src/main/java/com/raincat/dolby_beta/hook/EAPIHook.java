@@ -154,8 +154,6 @@ public class EAPIHook {
             // Check result type
             Object result = param.getResult();
             if (result == null) return;
-            if (!(result instanceof String) && !(result instanceof JSONObject))
-                return;
 
             // Resolve fields lazily (only once)
             if (!fieldsResolved) {
@@ -165,6 +163,12 @@ public class EAPIHook {
 
             // Get the URI from the enclosing o72/a (via o72/f field 'k')
             Uri uri = getUriFromCallback(param.thisObject);
+
+            // DEBUG: log every callback invocation
+            String resultType = result.getClass().getSimpleName();
+            String uriStr = (uri != null) ? uri.toString() : "null";
+            XposedBridge.log("[dolby_beta] EAPI callback fired: resultType=" + resultType
+                + " isJson=" + isJsonCallback + " uri=" + uriStr);
             if (uri == null || uri.getPath() == null) {
                 return;
             }

@@ -13,9 +13,13 @@ import com.raincat.dolby_beta.helper.SettingHelper;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.FileWriter;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.LinkedHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
@@ -38,6 +42,17 @@ import static de.robv.android.xposed.XposedHelpers.findClassIfExists;
 
 public class EAPIHook {
     private static final int VERSION_V9_5_30 = 9005030;
+    private static final String DEBUG_LOG_PATH = "/data/local/tmp/dolby_debug.log";
+    private static final SimpleDateFormat SDF = new SimpleDateFormat("HH:mm:ss.SSS");
+
+    private static void debugLog(String msg) {
+        XposedBridge.log("[dolby_beta] " + msg);
+        try {
+            FileWriter fw = new FileWriter(DEBUG_LOG_PATH, true);
+            fw.write(SDF.format(new Date()) + " " + msg + "\n");
+            fw.close();
+        } catch (IOException ignored) {}
+    }
 
     public EAPIHook(final Context context) {
         int versionCode = 0;
@@ -146,14 +161,24 @@ public class EAPIHook {
 
         @Override
         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+            debugLog("=== EAPI callback entered: isJson=" + isJsonCallback);
+
             // Check if proxy or black VIP is enabled
-            if (!SettingHelper.getInstance().isEnable(SettingHelper.black_key)
-                    && !SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key))
+            boolean blackEnabled = SettingHelper.getInstance().isEnable(SettingHelper.black_key);
+            boolean proxyEnabled = SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key);
+            debugLog("black_key enabled=" + blackEnabled + " proxy_master_key enabled=" + proxyEnabled);
+            if (!blackEnabled && !proxyEnabled) {
+                debugLog("EARLY RETURN: both disabled");
                 return;
+            }
 
             // Check result type
             Object result = param.getResult();
-            if (result == null) return;
+            if (result == null) {
+                debugLog("result is null, returning");
+                return;
+            }
+            debugLog("result type=" + result.getClass().getSimpleName() + " toString_len=" + result.toString().length());
 
             // Resolve fields lazily (only once)
             if (!fieldsResolved) {
@@ -163,17 +188,17 @@ public class EAPIHook {
 
             // Get the URI from the enclosing o72/a (via o72/f field 'k')
             Uri uri = getUriFromCallback(param.thisObject);
-
-            // DEBUG: log every callback invocation
-            String resultType = result.getClass().getSimpleName();
             String uriStr = (uri != null) ? uri.toString() : "null";
-            XposedBridge.log("[dolby_beta] EAPI callback fired: resultType=" + resultType
-                + " isJson=" + isJsonCallback + " uri=" + uriStr);
+            debugLog("uri=" + uriStr);
+
             if (uri == null || uri.getPath() == null) {
+                debugLog("URI is null or path is null, returning");
                 return;
             }
-            if (!uri.getPath().contains("/eapi/"))
+            if (!uri.getPath().contains("/eapi/")) {
+                debugLog("NOT eapi path: " + uri.getPath() + ", returning");
                 return;
+            }
 
             String path = uri.getPath();
             String original = result.toString();
@@ -181,7 +206,9 @@ public class EAPIHook {
 
             try {
                 if (path.contains("song/enhance/player/url")) {
+                    debugLog("MATCH: song/enhance/player/url, calling modifyPlayer");
                     original = EAPIHelper.modifyPlayer(original);
+                    debugLog("modifyPlayer returned, new len=" + original.length());
                 } else if (path.contains("song/enhance/download/url")) {
                     JSONObject jsonObject = new JSONObject(original);
                     JSONObject object = jsonObject.getJSONObject("data");

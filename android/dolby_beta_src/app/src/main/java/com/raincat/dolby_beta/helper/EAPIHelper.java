@@ -12,6 +12,8 @@ import de.robv.android.xposed.XposedBridge;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -34,6 +36,16 @@ public class EAPIHelper {
     private static final Gson gson = new Gson();
     private static final String GD_API_BASE = "https://music-api.gdstudio.xyz/api.php";
     private static final long CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+    private static final String DEBUG_LOG_PATH = "/data/local/tmp/dolby_debug.log";
+
+    private static void debugLog(String msg) {
+        XposedBridge.log("[dolby_beta] " + msg);
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter(DEBUG_LOG_PATH, true);
+            fw.write(new java.text.SimpleDateFormat("HH:mm:ss.SSS").format(new java.util.Date()) + " " + msg + "\n");
+            fw.close();
+        } catch (IOException ignored) {}
+    }
 
     // GD API URL 缓存: songId -> {url, timestamp}
     private static final HashMap<Long, CachedUrl> gdUrlCache = new HashMap<>();
@@ -106,7 +118,10 @@ public class EAPIHelper {
      * 解除下载加密 — 增强版：对试听片段调用 GD API 获取完整 URL
      */
     public static String modifyPlayer(String original) {
+        debugLog("modifyPlayer called, input len=" + original.length());
         NeteaseSongListBean listBean = gson.fromJson(original, NeteaseSongListBean.class);
+        int songCount = listBean.getData() != null ? listBean.getData().size() : 0;
+        debugLog("modifyPlayer: " + songCount + " songs in response");
 
         NeteaseSongListBean modifyListBean = new NeteaseSongListBean();
         modifyListBean.setCode(200);
@@ -117,6 +132,10 @@ public class EAPIHelper {
 
                 // 记录是否有试听标记，用于决定是否替换 URL
                 boolean hadFreeTrial = dataBean.getFreeTrialInfo() != null;
+
+                debugLog("song id=" + dataBean.getId() + " fee=" + dataBean.getFee()
+                    + " payed=" + dataBean.getPayed() + " hadFreeTrial=" + hadFreeTrial
+                    + " url=" + (dataBean.getUrl() != null ? dataBean.getUrl().substring(0, Math.min(80, dataBean.getUrl().length())) : "null"));
 
                 dataBean.setFee(0);
                 dataBean.setFlag(0);
@@ -134,10 +153,13 @@ public class EAPIHelper {
                     // 仅对有试听标记的歌曲替换 URL（原逻辑已将 freeTrialInfo 置空，但 hadFreeTrial 之前已记录）
                     // 不替换已有完整 VIP URL 的歌曲（用户可能有 VIP 账号）
                     if (hadFreeTrial) {
+                        debugLog("song " + dataBean.getId() + " has freeTrial, fetching from GD API...");
                         String gdUrl = fetchUrlFromGD(dataBean.getId(), 999);
                         if (gdUrl != null) {
                             dataBean.setUrl(gdUrl);
-                            // 不修改 br/size/type 等元数据，避免与实际音频流不匹配导致播放器拒绝
+                            debugLog("song " + dataBean.getId() + " GD API replaced URL OK");
+                        } else {
+                            debugLog("song " + dataBean.getId() + " GD API returned NULL, keeping original trial URL");
                         }
                     }
                 }

@@ -11,6 +11,8 @@ import com.raincat.dolby_beta.net.HTTPSTrustManager;
 import com.raincat.dolby_beta.utils.Tools;
 import com.stericson.RootShell.execution.Command;
 
+import de.robv.android.xposed.XposedBridge;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -66,7 +68,24 @@ public class ScriptHelper {
     public static void initScript(Context context, boolean cover) {
         File unblockFile = new File(getScriptPath(context));
         neteaseContext = context;
-        if (cover || !unblockFile.exists() || !(BuildConfig.VERSION_CODE + "").equals(ExtraHelper.getExtraDate(ExtraHelper.APP_VERSION))) {
+
+        // Migration: detect broken flat files from backslash-path unzip bug.
+        // If src/bootstrap/index.js doesn't exist as a proper file, force re-extract.
+        boolean needsMigration = false;
+        if (unblockFile.exists()) {
+            File bootstrapDir = new File(getScriptPath(context) + "/src/bootstrap");
+            if (!bootstrapDir.exists() || !bootstrapDir.isDirectory()) {
+                needsMigration = true;
+                XposedBridge.log("[dolby_beta] ScriptHelper: broken zip layout detected (backslash bug), forcing re-extract");
+            }
+        }
+
+        if (cover || !unblockFile.exists() || !(BuildConfig.VERSION_CODE + "").equals(ExtraHelper.getExtraDate(ExtraHelper.APP_VERSION)) || needsMigration) {
+            // Clean up old broken files before re-extracting
+            if (needsMigration) {
+                FileHelper.deleteDirectory(getScriptPath(context));
+                unblockFile.mkdirs();
+            }
             if (FileHelper.unzipFile(modulePath, getScriptPath(context), "assets", "UnblockNeteaseMusic.zip")) {
                 FileHelper.unzipFiles(getScriptPath(context) + "/UnblockNeteaseMusic.zip", getScriptPath(context));
             }

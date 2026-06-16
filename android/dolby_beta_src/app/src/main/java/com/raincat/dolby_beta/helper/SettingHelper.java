@@ -174,7 +174,7 @@ public class SettingHelper {
         settingMap.put(sign_key, sharedPreferences.getBoolean(sign_key, true));
         settingMap.put(sign_song_key, sharedPreferences.getBoolean(sign_song_key, false));
 
-        settingMap.put(proxy_master_key, sharedPreferences.getBoolean(proxy_master_key, true));
+        settingMap.put(proxy_master_key, sharedPreferences.getBoolean(proxy_master_key, false));
         settingMap.put(proxy_server_key, sharedPreferences.getBoolean(proxy_server_key, false));
         settingMap.put(proxy_priority_key, sharedPreferences.getBoolean(proxy_priority_key, false));
         settingMap.put(proxy_flac_key, sharedPreferences.getBoolean(proxy_flac_key, false));

@@ -34,16 +34,14 @@ jobs:
           # Step 1: Compile ObjC source (clang needs .m extension to recognize ObjC)
           cp ios/UNMHook/Tweak.x build/Tweak.m
 
-          clang++ \
+          clang \
             -c \
             -arch arm64 \
             -isysroot "$SDK" \
             -miphoneos-version-min=14.0 \
-            -framework Foundation \
-            -framework UIKit \
             -fobjc-arc \
+            -fobjc-weak \
             -fmodules \
-            -std=c++17 \
             -o build/Tweak.o \
             build/Tweak.m
 

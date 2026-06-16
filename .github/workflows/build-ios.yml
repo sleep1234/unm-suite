@@ -23,65 +23,32 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Install Theos (logos preprocessor only)
-        run: |
-          # We need Theos for the logos preprocessor (%hook/%orig/%ctor syntax)
-          export THEOS=/Users/runner/theos
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS" 2>&1 | tail -5
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
-          # Verify logos.pl exists
-          ls -la "$THEOS/bin/logos.pl" 2>/dev/null || echo "logos.pl not found"
-          find "$THEOS" -name "logos*" -type f 2>/dev/null | head -10
-
-      - name: Preprocess Logos and Build dylib
+      - name: Build dylib (pure ObjC, no Theos needed)
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          THEOS=/Users/runner/theos
           mkdir -p build
 
           echo "SDK: $SDK"
-          echo "THEOS: $THEOS"
+          echo "Compiling Tweak.x -> UNMHook.dylib"
 
-          # Find and run logos preprocessor
-          LOGOS_BIN=$(find "$THEOS" -name "logos.pl" -type f 2>/dev/null | head -1)
-          echo "Logos binary: $LOGOS_BIN"
-
-          if [ -z "$LOGOS_BIN" ]; then
-            echo "FATAL: logos.pl not found in Theos"
-            find "$THEOS/bin" -type f | head -20
-            exit 1
-          fi
-
-          # Preprocess Tweak.x -> Tweak.mm
-          perl "$LOGOS_BIN" ios/UNMHook/Tweak.x > build/Tweak.mm 2>&1
-          LOGOS_EXIT=$?
-          echo "Logos exit code: $LOGOS_EXIT"
-          echo "=== Output (last 30 lines) ==="
-          tail -30 build/Tweak.mm
-          wc -l build/Tweak.mm
-
-          if [ $LOGOS_EXIT -ne 0 ] || [ ! -s build/Tweak.mm ]; then
-            echo "Logos preprocessing failed!"
-            exit 1
-          fi
-
-          # Compile to dylib
           clang++ \
             -dynamiclib \
             -arch arm64 \
             -isysroot "$SDK" \
+            -miphoneos-version-min=14.0 \
             -framework Foundation \
             -framework UIKit \
             -fobjc-arc \
             -fmodules \
             -std=c++17 \
-            -install_name "@r/libUNMHook.dylib" \
+            -install_name "@rpath/libUNMHook.dylib" \
             -o build/UNMHook.dylib \
-            build/Tweak.mm 2>&1
+            ios/UNMHook/Tweak.x
 
           echo "=== Build result ==="
           file build/UNMHook.dylib
           ls -la build/UNMHook.dylib
+          codesign -dv build/UNMHook.dylib 2>&1 || true
 
       - name: Upload dylib artifact
         uses: actions/upload-artifact@v4

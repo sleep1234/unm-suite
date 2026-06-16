@@ -141,9 +141,16 @@ static BOOL injectMusicURLIntoDict(NSMutableDictionary *songDict) {
 // 保存原始方法实现
 static IMP orig_dataTaskWithRequest_completionHandler = NULL;
 
-// 替换方法实现
+// 用 @implementation 分类声明替换方法（纯 ObjC 必须在 @implementation 内声明方法）
+@interface NSURLSession (UNMHook)
 - (NSURLSessionDataTask *)unm_dataTaskWithRequest:(NSURLRequest *)request
-                               completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler;
+@end
+
+@implementation NSURLSession (UNMHook)
+
+- (NSURLSessionDataTask *)unm_dataTaskWithRequest:(NSURLRequest *)request
+                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     NSString *path = request.URL.path;
 
     BOOL isTarget = NO;
@@ -211,6 +218,8 @@ static IMP orig_dataTaskWithRequest_completionHandler = NULL;
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))
             orig_dataTaskWithRequest_completionHandler)(self, _cmd, request, newCompletionHandler);
 }
+
+@end
 
 // ============ 构造函数：安装 Hook ============
 

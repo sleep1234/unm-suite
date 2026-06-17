@@ -84,6 +84,16 @@ public class EAPIHook {
 
                             if (result instanceof JSONObject) {
                                 JSONObject batchJson = (JSONObject) result;
+                                // Log the keys of the batch JSON
+                                StringBuilder keysStr = new StringBuilder();
+                                Iterator<String> keys = batchJson.keys();
+                                int count = 0;
+                                while (keys.hasNext() && count < 20) {
+                                    keysStr.append(keys.next());
+                                    if (keys.hasNext()) keysStr.append(",");
+                                    count++;
+                                }
+                                debugLog("[V4-PATH-A] e1() JSONObject keys(" + batchJson.length() + "): " + keysStr);
                                 JSONObject modified = processBatchResponse(batchJson);
                                 if (modified != null) {
                                     param.setResult(modified);
@@ -163,7 +173,10 @@ public class EAPIHook {
                                 } catch (Exception ignored) {}
                             }
 
-                            if (urlStr == null) return;
+                                if (urlStr == null) return;
+
+                                // Log URL for debugging (first 150 chars)
+                                debugLog("[V4-PATH-B] Request URL: " + urlStr.substring(0, Math.min(150, urlStr.length())));
 
                             // Check if this is a player-related request
                             // EAPI requests go to /eapi/... with the actual API path in the body

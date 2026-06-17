@@ -24,19 +24,19 @@ import de.robv.android.xposed.XposedHelpers;
 import static de.robv.android.xposed.XposedHelpers.findClassIfExists;
 
 /**
- * EAPI Hook — v90: Full privilege modification + location/info interception
+ * EAPI Hook — v91: Full privilege modification with enhanced debug + ResponseBody fix
  *
- * v89 findings:
- * - privilege response has pl=0 (play level), dl=0 (download level), fl=0, cs=false
- * - These fields are AS important as fee/flag — pl=0 means "can't play"
- * - Simply clearing fee/flag/payed is NOT enough
+ * v90 findings:
+ * - privilege hook successfully modifies 28 songs but "REPLACED OK" never prints
+ * - rebuildResponse may silently fail at ResponseBody.create() or newBuilder().body()
+ * - location/info body only has 47 bytes (geo check, not song data)
  *
- * v90 approach:
- * 1. In privilege response: set fee=0, flag=0, payed=1, pl=320000, dl=320000,
- *    fl=999000, cs=true, st=0, subp=1, toast=false
- * 2. Also intercept /eapi/song/enhance/location/info to modify play URL
- * 3. For songs with no URL in privilege: the app should request location/info
- *    after seeing pl>0, which returns the actual play URL
+ * v91 approach:
+ * 1. Add detailed step-by-step debug logs in rebuildResponse
+ * 2. Add step-by-step logs in afterHookedMethod around setResult
+ * 3. Use try-catch around each individual step in rebuildResponse
+ * 4. Same privilege modification as v90: fee=0, flag=0, payed=1, pl=320000, etc.
+ * 5. Also intercept /eapi/song/enhance/location/info for play URL data
  */
 public class EAPIHook {
     private static final String DEBUG_LOG_PATH = "/data/local/tmp/dolby_debug.log";
@@ -73,60 +73,97 @@ public class EAPIHook {
         } catch (Exception e) { return null; }
     }
 
-    /** Rebuild an OkHttp Response with a new body string */
+    /** Rebuild an OkHttp Response with a new body string — v91 enhanced debug */
     private static Object rebuildResponse(Object originalResponse, String newBodyString, ClassLoader cl) {
         try {
+            debugLog("[V91-RB] step1: start rebuild, bodyLen=" + newBodyString.length());
+
             Class<?> mediaTypeClass = findClassIfExists("okhttp3.MediaType", cl);
             Class<?> responseBodyClass = findClassIfExists("okhttp3.ResponseBody", cl);
 
             if (responseBodyClass == null) {
-                debugLog("[V90] ResponseBody class not found!");
+                debugLog("[V91-RB] FAILED: ResponseBody class not found!");
                 return null;
             }
+            debugLog("[V91-RB] step2: found ResponseBody class: " + responseBodyClass.getName());
 
             Object newBody = null;
+
+            // Try create(mediaType, string) first
             if (mediaTypeClass != null) {
+                debugLog("[V91-RB] step3: trying MediaType.parse...");
                 try {
                     Object mediaType = XposedHelpers.callStaticMethod(mediaTypeClass, "parse", "application/json;charset=utf-8");
+                    debugLog("[V91-RB] step3a: mediaType=" + mediaType);
                     if (mediaType != null) {
+                        // Try all method signatures
+                        Method[] createMethods = responseBodyClass.getDeclaredMethods();
+                        for (Method cm : createMethods) {
+                            if (cm.getName().equals("create") && java.lang.reflect.Modifier.isStatic(cm.getModifiers())) {
+                                Class<?>[] ptypes = cm.getParameterTypes();
+                                debugLog("[V91-RB] step3b: create method: " + cm + " params=" + java.util.Arrays.toString(ptypes));
+                            }
+                        }
                         try {
                             newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create", mediaType, newBodyString);
+                            debugLog("[V91-RB] step3c: create(mediaType, string) succeeded");
                         } catch (Exception e1) {
+                            debugLog("[V91-RB] step3c-fail: create(mediaType, string) error: " + e1.getMessage());
                             try {
                                 newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create", newBodyString, mediaType);
+                                debugLog("[V91-RB] step3d: create(string, mediaType) succeeded");
                             } catch (Exception e2) {
-                                debugLog("[V90] ResponseBody.create with MediaType failed: " + e2.getMessage());
+                                debugLog("[V91-RB] step3d-fail: create(string, mediaType) error: " + e2.getMessage());
                             }
                         }
                     }
                 } catch (Exception e) {
-                    debugLog("[V90] MediaType.parse failed: " + e.getMessage());
+                    debugLog("[V91-RB] step3-fail: MediaType.parse error: " + e.getMessage());
                 }
+            } else {
+                debugLog("[V91-RB] step3-skip: MediaType class not found");
             }
+
             if (newBody == null) {
+                debugLog("[V91-RB] step4: trying create(string) without mediaType...");
                 try {
                     newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create", newBodyString);
+                    debugLog("[V91-RB] step4: create(string) succeeded");
                 } catch (Exception e) {
-                    debugLog("[V90] ResponseBody.create(string) failed: " + e.getMessage());
+                    debugLog("[V91-RB] step4-fail: create(string) error: " + e.getMessage());
                     return null;
                 }
             }
 
+            debugLog("[V91-RB] step5: calling newBuilder()...");
             Object builder = XposedHelpers.callMethod(originalResponse, "newBuilder");
+            debugLog("[V91-RB] step5a: newBuilder OK, calling body(newBody)...");
             XposedHelpers.callMethod(builder, "body", newBody);
+            debugLog("[V91-RB] step5b: body(newBody) OK");
+
             try {
                 Object headersBuilder = XposedHelpers.callMethod(
                     XposedHelpers.callMethod(builder, "headers"), "newBuilder");
                 XposedHelpers.callMethod(headersBuilder, "removeAll", "Content-Length");
                 Object newHeaders = XposedHelpers.callMethod(headersBuilder, "build");
                 XposedHelpers.callMethod(builder, "headers", newHeaders);
+                debugLog("[V91-RB] step6: headers cleaned");
             } catch (Exception e) {
-                debugLog("[V90] Header cleanup skipped: " + e.getMessage());
+                debugLog("[V91-RB] step6-skip: header cleanup skipped: " + e.getMessage());
             }
-            return XposedHelpers.callMethod(builder, "build");
+
+            debugLog("[V91-RB] step7: calling build()...");
+            Object result = XposedHelpers.callMethod(builder, "build");
+            debugLog("[V91-RB] step7: build() OK, response rebuilt!");
+            return result;
 
         } catch (Exception e) {
-            debugLog("[V90] rebuildResponse failed: " + e.getMessage());
+            debugLog("[V91-RB] FAILED: " + e.getClass().getName() + ": " + e.getMessage());
+            // Print stack trace elements
+            StackTraceElement[] stack = e.getStackTrace();
+            if (stack.length > 0) {
+                debugLog("[V91-RB] at " + stack[0]);
+            }
             return null;
         }
     }
@@ -155,7 +192,7 @@ public class EAPIHook {
 
             long songId = song.optLong("id", 0);
 
-            debugLog("[V90-PRI] id=" + songId + " fee=" + fee + " flag=" + flag +
+            debugLog("[V91-PRI] id=" + songId + " fee=" + fee + " flag=" + flag +
                     " payed=" + payed + " pl=" + pl + " dl=" + dl + " fl=" + fl +
                     " sp=" + sp + " cs=" + cs + " hasFreeTrial=" + hasFreeTrial);
 
@@ -190,19 +227,19 @@ public class EAPIHook {
 
             // For trial songs, set URL via GD API
             if (hasFreeTrial && songId > 0) {
-                debugLog("[V90-PRI] id=" + songId + " hadFreeTrial, fetching GD API...");
+                debugLog("[V91-PRI] id=" + songId + " hadFreeTrial, fetching GD API...");
                 String gdUrl = EAPIHelper.fetchUrlFromGD(songId, 999);
                 if (gdUrl != null) {
                     song.put("url", gdUrl);
-                    debugLog("[V90-PRI] id=" + songId + " GD API URL set");
+                    debugLog("[V91-PRI] id=" + songId + " GD API URL set");
                 } else {
-                    debugLog("[V90-PRI] id=" + songId + " GD API returned NULL");
+                    debugLog("[V91-PRI] id=" + songId + " GD API returned NULL");
                 }
             }
 
             return true;
         } catch (Exception e) {
-            debugLog("[V90-PRI] modifySong error: " + e.getMessage());
+            debugLog("[V91-PRI] modifySong error: " + e.getMessage());
             return false;
         }
     }
@@ -214,13 +251,13 @@ public class EAPIHook {
         try {
             JSONObject root = new JSONObject(bodyString);
             if (root.optInt("code") != 200) {
-                debugLog("[V90-PRI] response code=" + root.optInt("code") + ", skipping");
+                debugLog("[V91-PRI] response code=" + root.optInt("code") + ", skipping");
                 return null;
             }
 
             Object dataObj = root.opt("data");
             if (dataObj == null) {
-                debugLog("[V90-PRI] no data field");
+                debugLog("[V91-PRI] no data field");
                 return null;
             }
 
@@ -257,14 +294,16 @@ public class EAPIHook {
             }
 
             if (modifiedCount > 0) {
-                debugLog("[V90-PRI] Modified " + modifiedCount + " songs");
-                return root.toString();
+                debugLog("[V91-PRI] Modified " + modifiedCount + " songs, serializing...");
+                String result = root.toString();
+                debugLog("[V91-PRI] Serialized OK, len=" + result.length());
+                return result;
             } else {
-                debugLog("[V90-PRI] No songs needed modification");
+                debugLog("[V91-PRI] No songs needed modification");
                 return null;
             }
         } catch (Exception e) {
-            debugLog("[V90-PRI] modifyPrivilegeResponse error: " + e.getMessage());
+            debugLog("[V91-PRI] modifyPrivilegeResponse error: " + e.getMessage());
             return null;
         }
     }
@@ -277,13 +316,13 @@ public class EAPIHook {
         try {
             JSONObject root = new JSONObject(bodyString);
             if (root.optInt("code") != 200) {
-                debugLog("[V90-LOC] response code=" + root.optInt("code") + ", skipping");
+                debugLog("[V91-LOC] response code=" + root.optInt("code") + ", skipping");
                 return null;
             }
 
             Object dataObj = root.opt("data");
             if (dataObj == null) {
-                debugLog("[V90-LOC] no data field");
+                debugLog("[V91-LOC] no data field");
                 return null;
             }
 
@@ -306,14 +345,14 @@ public class EAPIHook {
             }
 
             if (modifiedCount > 0) {
-                debugLog("[V90-LOC] Modified " + modifiedCount + " songs in location/info");
+                debugLog("[V91-LOC] Modified " + modifiedCount + " songs in location/info");
                 return root.toString();
             } else {
-                debugLog("[V90-LOC] No songs needed modification in location/info");
+                debugLog("[V91-LOC] No songs needed modification in location/info");
                 return null;
             }
         } catch (Exception e) {
-            debugLog("[V90-LOC] modifyLocationInfoResponse error: " + e.getMessage());
+            debugLog("[V91-LOC] modifyLocationInfoResponse error: " + e.getMessage());
             return null;
         }
     }
@@ -329,7 +368,7 @@ public class EAPIHook {
             String url = song.optString("url", null);
             boolean hasFreeTrial = song.has("freeTrialInfo") && !song.isNull("freeTrialInfo");
 
-            debugLog("[V90-LOC] id=" + songId + " fee=" + fee + " flag=" + flag +
+            debugLog("[V91-LOC] id=" + songId + " fee=" + fee + " flag=" + flag +
                     " hasFreeTrial=" + hasFreeTrial +
                     " url=" + (url != null ? url.substring(0, Math.min(80, url.length())) : "null"));
 
@@ -357,13 +396,13 @@ public class EAPIHook {
 
                 // If URL is null or restricted, try GD API
                 if ((url == null || hasFreeTrial) && songId > 0) {
-                    debugLog("[V90-LOC] id=" + songId + " fetching GD API for URL...");
+                    debugLog("[V91-LOC] id=" + songId + " fetching GD API for URL...");
                     String gdUrl = EAPIHelper.fetchUrlFromGD(songId, 999);
                     if (gdUrl != null) {
                         song.put("url", gdUrl);
-                        debugLog("[V90-LOC] id=" + songId + " GD API URL set OK");
+                        debugLog("[V91-LOC] id=" + songId + " GD API URL set OK");
                     } else {
-                        debugLog("[V90-LOC] id=" + songId + " GD API returned NULL");
+                        debugLog("[V91-LOC] id=" + songId + " GD API returned NULL");
                     }
                 }
                 modified = true;
@@ -371,22 +410,22 @@ public class EAPIHook {
 
             return modified;
         } catch (Exception e) {
-            debugLog("[V90-LOC] modifyLocationSong error: " + e.getMessage());
+            debugLog("[V91-LOC] modifyLocationSong error: " + e.getMessage());
             return false;
         }
     }
 
     public EAPIHook(Context context, int versionCode, ClassLoader cl) {
         this.appClassLoader = cl;
-        debugLog("=== EAPIHook v90 FULL PRIVILEGE init, versionCode=" + versionCode + " ===");
+        debugLog("=== EAPIHook v91 FULL PRIVILEGE + ENHANCED DEBUG init, versionCode=" + versionCode + " ===");
 
         hookRealCallExecute();
 
-        debugLog("=== EAPIHook v90 init complete ===");
+        debugLog("=== EAPIHook v91 init complete ===");
     }
 
     private void hookRealCallExecute() {
-        debugLog("[V90] Hooking RealCall.execute()...");
+        debugLog("[V91] Hooking RealCall.execute()...");
 
         String[] callClassNames = {
             "okhttp3.internal.connection.RealCall",
@@ -412,11 +451,11 @@ public class EAPIHook {
         }
 
         if (callClass == null) {
-            debugLog("[V90] No Call class found!");
+            debugLog("[V91] No Call class found!");
             return;
         }
 
-        debugLog("[V90] Found: " + foundName);
+        debugLog("[V91] Found: " + foundName);
 
         for (Method m : callClass.getDeclaredMethods()) {
             if (m.getName().equals("execute") && m.getParameterTypes().length == 0) {
@@ -430,32 +469,45 @@ public class EAPIHook {
 
                                 // Intercept privilege endpoint
                                 if (url.contains("song/enhance/privilege")) {
-                                    debugLog("[V90] >>> privilege caught");
+                                    debugLog("[V91] >>> privilege caught");
                                     Object response = param.getResult();
-                                    if (response == null) return;
+                                    if (response == null) {
+                                        debugLog("[V91] privilege response=null, skip");
+                                        return;
+                                    }
 
                                     Object body = XposedHelpers.callMethod(response, "body");
-                                    if (body == null) return;
+                                    if (body == null) {
+                                        debugLog("[V91] privilege body=null, skip");
+                                        return;
+                                    }
 
                                     String bodyString = (String) XposedHelpers.callMethod(body, "string");
-                                    if (bodyString == null || bodyString.isEmpty()) return;
+                                    if (bodyString == null || bodyString.isEmpty()) {
+                                        debugLog("[V91] privilege bodyString empty, skip");
+                                        return;
+                                    }
 
-                                    debugLog("[V90] privilege body len=" + bodyString.length());
+                                    debugLog("[V91] privilege body len=" + bodyString.length());
 
                                     String modifiedBody = modifyPrivilegeResponse(bodyString);
+                                    debugLog("[V91] modifyPrivilegeResponse returned: " + (modifiedBody != null ? "len=" + modifiedBody.length() : "null"));
                                     if (modifiedBody != null) {
+                                        debugLog("[V91] calling rebuildResponse...");
                                         Object newResponse = rebuildResponse(response, modifiedBody, appClassLoader);
+                                        debugLog("[V91] rebuildResponse returned: " + (newResponse != null ? "OK" : "null"));
                                         if (newResponse != null) {
+                                            debugLog("[V91] calling setResult...");
                                             param.setResult(newResponse);
-                                            debugLog("[V90] >>> privilege REPLACED OK");
+                                            debugLog("[V91] >>> privilege REPLACED OK");
                                         } else {
-                                            debugLog("[V90] rebuildResponse failed for privilege");
+                                            debugLog("[V91] rebuildResponse failed for privilege");
                                         }
                                     }
                                 }
                                 // Intercept location/info endpoint
                                 else if (url.contains("song/enhance/location")) {
-                                    debugLog("[V90] >>> location/info caught");
+                                    debugLog("[V91] >>> location/info caught");
                                     Object response = param.getResult();
                                     if (response == null) return;
 
@@ -465,7 +517,7 @@ public class EAPIHook {
                                     String bodyString = (String) XposedHelpers.callMethod(body, "string");
                                     if (bodyString == null || bodyString.isEmpty()) return;
 
-                                    debugLog("[V90] location/info body len=" + bodyString.length() +
+                                    debugLog("[V91] location/info body len=" + bodyString.length() +
                                             " preview=" + bodyString.substring(0, Math.min(300, bodyString.length())));
 
                                     String modifiedBody = modifyLocationInfoResponse(bodyString);
@@ -473,18 +525,22 @@ public class EAPIHook {
                                         Object newResponse = rebuildResponse(response, modifiedBody, appClassLoader);
                                         if (newResponse != null) {
                                             param.setResult(newResponse);
-                                            debugLog("[V90] >>> location/info REPLACED OK");
+                                            debugLog("[V91] >>> location/info REPLACED OK");
                                         }
                                     }
                                 }
                             } catch (Exception e) {
-                                debugLog("[V90] execute hook error: " + e.getMessage());
+                                debugLog("[V91] execute hook error: " + e.getClass().getName() + ": " + e.getMessage());
+                                StackTraceElement[] stack = e.getStackTrace();
+                                if (stack.length > 0) {
+                                    debugLog("[V91] at " + stack[0]);
+                                }
                             }
                         }
                     });
-                    debugLog("[V90] Hooked " + foundName + ".execute()");
+                    debugLog("[V91] Hooked " + foundName + ".execute()");
                 } catch (Exception e) {
-                    debugLog("[V90] Failed to hook execute(): " + e.getMessage());
+                    debugLog("[V91] Failed to hook execute(): " + e.getMessage());
                 }
                 break;
             }
@@ -528,7 +584,7 @@ public class EAPIHook {
                             }
 
                             if (onResponseMethod == null) {
-                                debugLog("[V90] enqueue: onResponse not found");
+                                debugLog("[V91] enqueue: onResponse not found");
                                 return;
                             }
 
@@ -550,10 +606,10 @@ public class EAPIHook {
 
                                         String modifiedBody;
                                         if (isPrivilege) {
-                                            debugLog("[V90] >>> async privilege caught, len=" + bodyString.length());
+                                            debugLog("[V91] >>> async privilege caught, len=" + bodyString.length());
                                             modifiedBody = modifyPrivilegeResponse(bodyString);
                                         } else {
-                                            debugLog("[V90] >>> async location/info caught, len=" + bodyString.length());
+                                            debugLog("[V91] >>> async location/info caught, len=" + bodyString.length());
                                             modifiedBody = modifyLocationInfoResponse(bodyString);
                                         }
 
@@ -561,19 +617,19 @@ public class EAPIHook {
                                             Object newResponse = rebuildResponse(response, modifiedBody, appClassLoader);
                                             if (newResponse != null) {
                                                 hp.args[1] = newResponse;
-                                                debugLog("[V90] >>> async REPLACED OK");
+                                                debugLog("[V91] >>> async REPLACED OK");
                                             }
                                         }
                                     } catch (Exception e) {
-                                        debugLog("[V90] async hook error: " + e.getMessage());
+                                        debugLog("[V91] async hook error: " + e.getMessage());
                                     }
                                 }
                             });
                         }
                     });
-                    debugLog("[V90] Hooked " + foundName + ".enqueue()");
+                    debugLog("[V91] Hooked " + foundName + ".enqueue()");
                 } catch (Exception e) {
-                    debugLog("[V90] Failed to hook enqueue(): " + e.getMessage());
+                    debugLog("[V91] Failed to hook enqueue(): " + e.getMessage());
                 }
                 break;
             }

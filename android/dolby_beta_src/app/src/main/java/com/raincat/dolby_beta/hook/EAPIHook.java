@@ -30,14 +30,19 @@ import static de.robv.android.xposed.XposedHelpers.findClassIfExists;
 
 
 /**
- * EAPI Hook — v9.5.30+ uses callback class hook instead of HttpResponse.getResultMethod()
+ * EAPI Hook — v3: Comprehensive debug + multi-level hooking
  *
- * v9.5.30 architecture:
+ * v9.5.30 architecture (confirmed):
  * - o72/a (EAPI request) holds URL, params, and result
- * - o72/a$d.b(String)->JSONObject is the result callback for JSONObject responses
- * - o72/a$e.b(String)->String is the result callback for String responses
- * - Both callbacks have field 'a' referencing the enclosing o72/a instance
- * - o72/a inherits from o72/f which has field 'k' (android.net.Uri)
+ * - o72/a extends o72/p -> o72/e -> o72/f (which has Uri field 'k')
+ * - o72/a$d was believed to be JSON callback, o72/a$e String callback
+ *   BUT: these hook-registration succeeds, afterHookedMethod NEVER fires
+ *
+ * v3 strategy:
+ * 1. Hook ALL methods on o72.a$d / o72.a$e (not just b(String))
+ * 2. Hook ALL methods on o72.a that return JSONObject or String
+ * 3. Search and hook lambda classes in o72 package
+ * 4. Comprehensive debug logging at every level
  */
 
 public class EAPIHook {
@@ -62,334 +67,412 @@ public class EAPIHook {
         } catch (Exception e) {
             // fallback
         }
+        debugLog("=== EAPIHook init, versionCode=" + versionCode + " ===");
 
         if (versionCode >= VERSION_V9_5_30) {
-            initV2(context, versionCode);
+            initV3(context, versionCode);
         } else {
             initLegacy(context);
         }
     }
 
     /**
-     * v9.5.30+ hook: intercept EAPI results via callback inner classes
-     *
-     * o72/a$d.b(String)->JSONObject — called when EAPI response is parsed to JSONObject
-     * o72/a$e.b(String)->String — called when EAPI response is returned as String
-     *
-     * Both inner classes have field 'a' = enclosing o72/a instance.
-     * o72/a (via o72/f) has field 'k' = android.net.Uri (the request URI).
+     * v3 hook: comprehensive multi-level debugging + interception
      */
-    private void initV2(final Context context, int versionCode) {
+    private void initV3(final Context context, int versionCode) {
         ClassLoader cl = context.getClassLoader();
-        boolean hooked = false;
 
-        // Hook o72/a$d.b(String)->JSONObject
+        // ========== LEVEL 1: Hook ALL methods on o72.a$d (not just b(String)) ==========
         Class<?> callbackJsonClass = findClassIfExists("o72.a$d", cl);
         if (callbackJsonClass != null) {
-            try {
-                Method bMethod = XposedHelpers.findMethodExact(callbackJsonClass, "b", String.class);
-                XposedBridge.hookMethod(bMethod, new EapiCallbackHook(context, true));
-                XposedBridge.log("[dolby_beta] EAPIHook v2: hooked o72.a$d.b(String)->JSONObject");
-                hooked = true;
-            } catch (Exception e) {
-                XposedBridge.log("[dolby_beta] EAPIHook v2: failed to hook o72.a$d: " + e.getMessage());
-                // Try alternative: search for method returning JSONObject
+            debugLog("[V3-LEVEL1] o72.a$d found, hooking ALL methods...");
+            int hookCount = 0;
+            for (Method m : callbackJsonClass.getDeclaredMethods()) {
+                if (Modifier.isAbstract(m.getModifiers())) continue;
                 try {
-                    for (Method m : callbackJsonClass.getDeclaredMethods()) {
-                        if (m.getName().equals("b") && m.getReturnType() == JSONObject.class) {
-                            XposedBridge.hookMethod(m, new EapiCallbackHook(context, true));
-                            XposedBridge.log("[dolby_beta] EAPIHook v2: hooked o72.a$d.b via reflection");
-                            hooked = true;
-                            break;
+                    final String methodName = m.getName();
+                    final String methodDesc = m.getReturnType().getSimpleName() + " " + methodName +
+                            "(" + paramTypesStr(m) + ")";
+                    debugLog("[V3-LEVEL1] o72.a$d." + methodDesc);
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            debugLog("[V3-LEVEL1-CALL] o72.a$d." + methodName + " CALLED! args=" + param.args.length);
+                            // If this is b(String) returning JSONObject, try full EAPI processing
+                            if (isJsonCallbackMethod(param)) {
+                                processEapiCallback(param, context);
+                            }
                         }
-                    }
-                } catch (Exception e2) {
-                    XposedBridge.log("[dolby_beta] EAPIHook v2: reflection fallback also failed: " + e2.getMessage());
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            Object result = param.getResult();
+                            String resultStr = result != null ?
+                                    result.getClass().getSimpleName() + "(len=" + result.toString().length() + ")" : "null";
+                            debugLog("[V3-LEVEL1-AFTER] o72.a$d." + methodName + " result=" + resultStr);
+                        }
+                    });
+                    hookCount++;
+                } catch (Exception e) {
+                    debugLog("[V3-LEVEL1] failed to hook o72.a$d." + m.getName() + ": " + e.getMessage());
                 }
             }
+            debugLog("[V3-LEVEL1] o72.a$d: hooked " + hookCount + " methods");
         } else {
-            XposedBridge.log("[dolby_beta] EAPIHook v2: o72.a$d class not found");
+            debugLog("[V3-LEVEL1] o72.a$d class NOT found");
         }
 
-        // Hook o72/a$e.b(String)->String
+        // ========== LEVEL 2: Hook ALL methods on o72.a$e (not just b(String)) ==========
         Class<?> callbackStringClass = findClassIfExists("o72.a$e", cl);
         if (callbackStringClass != null) {
-            try {
-                Method bMethod = XposedHelpers.findMethodExact(callbackStringClass, "b", String.class);
-                XposedBridge.hookMethod(bMethod, new EapiCallbackHook(context, false));
-                XposedBridge.log("[dolby_beta] EAPIHook v2: hooked o72.a$e.b(String)->String");
-                hooked = true;
-            } catch (Exception e) {
-                XposedBridge.log("[dolby_beta] EAPIHook v2: failed to hook o72.a$e: " + e.getMessage());
+            debugLog("[V3-LEVEL2] o72.a$e found, hooking ALL methods...");
+            int hookCount = 0;
+            for (Method m : callbackStringClass.getDeclaredMethods()) {
+                if (Modifier.isAbstract(m.getModifiers())) continue;
                 try {
-                    for (Method m : callbackStringClass.getDeclaredMethods()) {
-                        if (m.getName().equals("b") && m.getReturnType() == String.class) {
-                            XposedBridge.hookMethod(m, new EapiCallbackHook(context, false));
-                            XposedBridge.log("[dolby_beta] EAPIHook v2: hooked o72.a$e.b via reflection");
-                            hooked = true;
+                    final String methodName = m.getName();
+                    final String methodDesc = m.getReturnType().getSimpleName() + " " + methodName +
+                            "(" + paramTypesStr(m) + ")";
+                    debugLog("[V3-LEVEL2] o72.a$e." + methodDesc);
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            debugLog("[V3-LEVEL2-CALL] o72.a$e." + methodName + " CALLED! args=" + param.args.length);
+                            if (isStringCallbackMethod(param)) {
+                                processEapiCallback(param, context);
+                            }
+                        }
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            Object result = param.getResult();
+                            String resultStr = result != null ?
+                                    result.getClass().getSimpleName() + "(len=" + result.toString().length() + ")" : "null";
+                            debugLog("[V3-LEVEL2-AFTER] o72.a$e." + methodName + " result=" + resultStr);
+                        }
+                    });
+                    hookCount++;
+                } catch (Exception e) {
+                    debugLog("[V3-LEVEL2] failed to hook o72.a$e." + m.getName() + ": " + e.getMessage());
+                }
+            }
+            debugLog("[V3-LEVEL2] o72.a$e: hooked " + hookCount + " methods");
+        } else {
+            debugLog("[V3-LEVEL2] o72.a$e class NOT found");
+        }
+
+        // ========== LEVEL 3: Hook ALL methods on o72.a that return JSONObject or String ==========
+        Class<?> eapiClass = findClassIfExists("o72.a", cl);
+        if (eapiClass != null) {
+            debugLog("[V3-LEVEL3] o72.a found, scanning methods...");
+            int hookCount = 0;
+            for (Method m : eapiClass.getDeclaredMethods()) {
+                Class<?> retType = m.getReturnType();
+                if ((retType == JSONObject.class || retType == String.class)
+                        && !Modifier.isAbstract(m.getModifiers())) {
+                    try {
+                        final String methodName = m.getName();
+                        final String methodDesc = retType.getSimpleName() + " " + methodName +
+                                "(" + paramTypesStr(m) + ")";
+                        debugLog("[V3-LEVEL3] o72.a." + methodDesc);
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                Object result = param.getResult();
+                                String resultPreview = "";
+                                if (result != null) {
+                                    String s = result.toString();
+                                    resultPreview = "len=" + s.length() +
+                                            " preview=" + s.substring(0, Math.min(200, s.length()));
+                                }
+                                debugLog("[V3-LEVEL3-CALL] o72.a." + methodName + " result=" + resultPreview);
+                            }
+                        });
+                        hookCount++;
+                    } catch (Exception e) {
+                        debugLog("[V3-LEVEL3] failed to hook o72.a." + m.getName() + ": " + e.getMessage());
+                    }
+                }
+            }
+            debugLog("[V3-LEVEL3] o72.a: hooked " + hookCount + " JSONObject/String-returning methods");
+        } else {
+            debugLog("[V3-LEVEL3] o72.a class NOT found");
+        }
+
+        // ========== LEVEL 4: Search for lambda classes in o72 package ==========
+        debugLog("[V3-LEVEL4] Searching for lambda classes in o72 package...");
+        int lambdaCount = 0;
+        for (int i = 0; i <= 20; i++) {
+            String lambdaName = "o72.a$$ExternalSyntheticLambda" + i;
+            Class<?> lambdaClass = findClassIfExists(lambdaName, cl);
+            if (lambdaClass == null) {
+                // Also try without $$
+                lambdaName = "o72.a$ExternalSyntheticLambda" + i;
+                lambdaClass = findClassIfExists(lambdaName, cl);
+            }
+            if (lambdaClass != null) {
+                debugLog("[V3-LEVEL4] Found lambda: " + lambdaName);
+                for (Method m : lambdaClass.getDeclaredMethods()) {
+                    if (Modifier.isAbstract(m.getModifiers())) continue;
+                    try {
+                        final String methodName = m.getName();
+                        final String methodDesc = m.getReturnType().getSimpleName() + " " + methodName +
+                                "(" + paramTypesStr(m) + ")";
+                        debugLog("[V3-LEVEL4] " + lambdaName + "." + methodDesc);
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                debugLog("[V3-LEVEL4-CALL] " + lambdaName + "." + methodName + " CALLED! args=" + param.args.length);
+                            }
+                        });
+                        lambdaCount++;
+                    } catch (Exception e) {
+                        debugLog("[V3-LEVEL4] failed to hook " + lambdaName + "." + m.getName() + ": " + e.getMessage());
+                    }
+                }
+            }
+        }
+        // Also check for other o72 inner classes that might be callbacks
+        for (char c = 'a'; c <= 'z'; c++) {
+            for (char c2 = 'a'; c2 <= 'z'; c2++) {
+                String innerName = "o72.a$" + c + c2;
+                Class<?> innerClass = findClassIfExists(innerName, cl);
+                if (innerClass != null && innerClass != callbackJsonClass && innerClass != callbackStringClass) {
+                    // Check if this class has methods with suitable parameter types
+                    boolean hasBMethod = false;
+                    for (Method m : innerClass.getDeclaredMethods()) {
+                        if (m.getName().equals("b") && m.getParameterTypes().length == 1
+                                && (m.getParameterTypes()[0] == String.class || m.getParameterTypes()[0] == JSONObject.class)) {
+                            hasBMethod = true;
                             break;
                         }
                     }
-                } catch (Exception e2) {
-                    XposedBridge.log("[dolby_beta] EAPIHook v2: reflection fallback also failed: " + e2.getMessage());
-                }
-            }
-        } else {
-            XposedBridge.log("[dolby_beta] EAPIHook v2: o72.a$e class not found");
-        }
-
-        if (!hooked) {
-            XposedBridge.log("[dolby_beta] EAPIHook v2: no callbacks hooked, falling back to legacy");
-            initLegacy(context);
-        }
-    }
-
-    /**
-     * Inner class for EAPI callback hooks (v9.5.30+)
-     */
-    private class EapiCallbackHook extends XC_MethodHook {
-        private final Context context;
-        private final boolean isJsonCallback;
-        private Field enclosingField; // field 'a' on callback class -> enclosing o72/a
-        private Field uriField;       // field 'k' on o72/f -> android.net.Uri
-        private boolean fieldsResolved = false;
-
-        EapiCallbackHook(Context context, boolean isJsonCallback) {
-            this.context = context;
-            this.isJsonCallback = isJsonCallback;
-        }
-
-        @Override
-        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-            debugLog("=== EAPI callback entered: isJson=" + isJsonCallback);
-
-            // Check if proxy or black VIP is enabled
-            boolean blackEnabled = SettingHelper.getInstance().isEnable(SettingHelper.black_key);
-            boolean proxyEnabled = SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key);
-            debugLog("black_key enabled=" + blackEnabled + " proxy_master_key enabled=" + proxyEnabled);
-            if (!blackEnabled && !proxyEnabled) {
-                debugLog("EARLY RETURN: both disabled");
-                return;
-            }
-
-            // Check result type
-            Object result = param.getResult();
-            if (result == null) {
-                debugLog("result is null, returning");
-                return;
-            }
-            debugLog("result type=" + result.getClass().getSimpleName() + " toString_len=" + result.toString().length());
-
-            // Resolve fields lazily (only once)
-            if (!fieldsResolved) {
-                resolveFields(param.thisObject.getClass());
-                fieldsResolved = true;
-            }
-
-            // Get the URI from the enclosing o72/a (via o72/f field 'k')
-            Uri uri = getUriFromCallback(param.thisObject);
-            String uriStr = (uri != null) ? uri.toString() : "null";
-            debugLog("uri=" + uriStr);
-
-            if (uri == null || uri.getPath() == null) {
-                debugLog("URI is null or path is null, returning");
-                return;
-            }
-            if (!uri.getPath().contains("/eapi/")) {
-                debugLog("NOT eapi path: " + uri.getPath() + ", returning");
-                return;
-            }
-
-            String path = uri.getPath();
-            String original = result.toString();
-            if (TextUtils.isEmpty(original)) return;
-
-            try {
-                if (path.contains("song/enhance/player/url")) {
-                    debugLog("MATCH: song/enhance/player/url, calling modifyPlayer");
-                    original = EAPIHelper.modifyPlayer(original);
-                    debugLog("modifyPlayer returned, new len=" + original.length());
-                } else if (path.contains("song/enhance/download/url")) {
-                    JSONObject jsonObject = new JSONObject(original);
-                    JSONObject object = jsonObject.getJSONObject("data");
-                    JSONArray array = new JSONArray();
-                    array.put(object);
-                    jsonObject.put("data", array);
-                    original = EAPIHelper.modifyPlayer(jsonObject.toString())
-                            .replace("[", "").replace("]", "");
-                } else if (path.contains("v1/playlist/manipulate/tracks")) {
-                    LinkedHashMap<String, String> params = getParamsFromUri(uri);
-                    original = EAPIHelper.modifyManipulate(params, original);
-                } else if (path.contains("song/like")) {
-                    LinkedHashMap<String, String> params = getParamsFromUri(uri);
-                    original = EAPIHelper.modifyLike(params, original);
-                } else if (path.contains("sound/mobile") || path.contains("page=audio_effect")) {
-                    original = EAPIHelper.modifyEffect(original);
-                } else if (path.contains("batch")) {
-                    if (original.contains("comment\\/banner\\/get")) {
-                        JSONObject jsonObject = new JSONObject(original);
-                        if (!jsonObject.isNull("/api/content/exposure/comment/banner/get")) {
-                            JSONObject object = new JSONObject();
-                            object.put("code", 200);
-                            object.put("data", new JSONObject());
-                            jsonObject.put("/api/content/exposure/comment/banner/get", object);
-                        }
-                        if (!jsonObject.isNull("/api/v1/content/exposure/comment/banner/get")) {
-                            JSONObject object = jsonObject.getJSONObject("/api/v1/content/exposure/comment/banner/get");
-                            JSONObject data = object.getJSONObject("data");
-                            data.put("count", 0);
-                            data.put("offset", 999999999);
-                            data.put("records", new JSONArray());
-                            data.put("message", "");
-                            object.put("data", data);
-                            jsonObject.put("/api/v1/content/exposure/comment/banner/get", object);
-                        }
-                        original = jsonObject.toString();
-                    } else if (SettingHelper.getInstance().isEnable(SettingHelper.fix_comment_key) &&
-                            original.contains("\\/api\\/resource\\/comment\\/musiciansaid\\/authors")) {
-                        JSONObject jsonObject = new JSONObject(original);
-                        JSONObject object = jsonObject.getJSONObject("/api/resource/comment/musiciansaid/authors");
-                        JSONObject data = object.getJSONObject("data");
-                        JSONArray team = data.getJSONArray("team");
-                        for (int i = 0; i < team.length(); i++) {
-                            JSONObject o = team.getJSONObject(i);
-                            String s = o.optString("authorTypeText");
-                            if (s != null && s.equals("作者")) {
-                                long uid = o.optLong("uid");
-                                long artistId = o.optLong("artistId");
-                                if (uid > 2147483647) {
-                                    JSONObject artistJSONObject = jsonObject.getJSONObject("/api/auth/artist");
-                                    JSONObject authJSONObject = artistJSONObject.getJSONObject("auth");
-                                    while (uid > 2147483647)
-                                        uid = uid / 10;
-                                    authJSONObject.put(artistId + "", uid);
-                                    artistJSONObject.put("auth", authJSONObject);
-                                    jsonObject.put("/api/auth/artist", artistJSONObject);
-                                    original = jsonObject.toString();
-                                }
+                    if (hasBMethod) {
+                        debugLog("[V3-LEVEL4] Found alternative callback: " + innerName);
+                        for (Method m : innerClass.getDeclaredMethods()) {
+                            if (Modifier.isAbstract(m.getModifiers())) continue;
+                            try {
+                                final String methodName = m.getName();
+                                final String innerName_ = innerName;
+                                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                                    @Override
+                                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                        debugLog("[V3-LEVEL4-CALL] " + innerName_ + "." + methodName + " CALLED!");
+                                    }
+                                });
+                                lambdaCount++;
+                            } catch (Exception e) {
+                                debugLog("[V3-LEVEL4] failed to hook " + innerName + "." + m.getName());
                             }
                         }
                     }
-                } else if (path.contains("upload/cloud/info/v2")) {
-                    JSONObject jsonObject = new JSONObject(original);
-                    jsonObject = jsonObject.getJSONObject("privateCloud");
-                    jsonObject = jsonObject.getJSONObject("simpleSong");
-                    original = original.replace("\"waitTime\":60,", "\"waitTime\":5,");
-                    CloudDao.getInstance(context).saveSong(Integer.parseInt(jsonObject.getString("id")), original);
-                } else if (path.contains("cloud/pub/v2")) {
-                    LinkedHashMap<String, String> paramsMap = getParamsFromUri(uri);
-                    String paramsStr = paramsMap.get("params");
-                    if (paramsStr == null) paramsStr = "";
-                    String songid = EAPIHelper.decrypt(paramsStr).getString("songid");
-                    EAPIHelper.uploadCloud(songid);
-                    original = CloudDao.getInstance(context).getSong(Integer.parseInt(songid));
                 }
-
-                // Set modified result
-                if (isJsonCallback && result instanceof JSONObject) {
-                    param.setResult(new JSONObject(original));
-                } else {
-                    param.setResult(original);
-                }
-            } catch (Exception e) {
-                XposedBridge.log("[dolby_beta] EAPIHook v2: error processing " + path + ": " + e.getMessage());
             }
         }
+        debugLog("[V3-LEVEL4] Lambda/alt callback hooks: " + lambdaCount);
 
-        /**
-         * Resolve the field references: callback.a -> enclosing o72/a, and o72/f.k -> Uri
-         */
-        private void resolveFields(Class<?> callbackClass) {
-            // Find field referencing o72/a on the callback class
-            // The field is named 'a' or 'b' and is of type o72/a (synthetic)
-            for (Field f : callbackClass.getDeclaredFields()) {
+        // ========== LEVEL 5: Interceptor.q method calls ==========
+        // This is handled by CdnHook which we'll add debug logging to separately
+        // But also add our own debug hooks here
+        Class<?> interceptorClass = findClassIfExists("com.netease.cloudmusic.network.interceptor.q", cl);
+        if (interceptorClass != null) {
+            debugLog("[V3-LEVEL5] interceptor.q found, hooking ALL methods for debug...");
+            for (Method m : interceptorClass.getDeclaredMethods()) {
+                if (Modifier.isAbstract(m.getModifiers())) continue;
+                try {
+                    final String methodName = m.getName();
+                    final String methodDesc = m.getReturnType().getSimpleName() + " " + methodName +
+                            "(" + paramTypesStr(m) + ")";
+                    debugLog("[V3-LEVEL5] interceptor.q." + methodDesc);
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            debugLog("[V3-LEVEL5-CALL] interceptor.q." + methodName + " CALLED! args=" + param.args.length);
+                        }
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            Object result = param.getResult();
+                            String resultStr = result != null ? result.getClass().getSimpleName() : "null";
+                            debugLog("[V3-LEVEL5-AFTER] interceptor.q." + methodName + " result=" + resultStr);
+                        }
+                    });
+                } catch (Exception e) {
+                    debugLog("[V3-LEVEL5] failed to hook interceptor.q." + m.getName() + ": " + e.getMessage());
+                }
+            }
+        } else {
+            debugLog("[V3-LEVEL5] interceptor.q class NOT found");
+        }
+    }
+
+    /**
+     * Check if this looks like the JSON callback method (b(String)->JSONObject)
+     */
+    private boolean isJsonCallbackMethod(XC_MethodHook.MethodHookParam param) {
+        return param.args.length >= 1 && param.args[0] instanceof String;
+    }
+
+    /**
+     * Check if this looks like the String callback method (b(String)->String)
+     */
+    private boolean isStringCallbackMethod(XC_MethodHook.MethodHookParam param) {
+        return param.args.length >= 1 && param.args[0] instanceof String;
+    }
+
+    /**
+     * Process EAPI callback result — same logic as v2 but with debug logging
+     */
+    private void processEapiCallback(XC_MethodHook.MethodHookParam param, Context context) {
+        boolean blackEnabled = SettingHelper.getInstance().isEnable(SettingHelper.black_key);
+        boolean proxyEnabled = SettingHelper.getInstance().isEnable(SettingHelper.proxy_master_key);
+        debugLog("[V3-PROCESS] black=" + blackEnabled + " proxy=" + proxyEnabled);
+        if (!blackEnabled && !proxyEnabled) {
+            debugLog("[V3-PROCESS] Both disabled, skipping");
+            return;
+        }
+
+        // Try to get URI from the callback's enclosing instance
+        Uri uri = null;
+        try {
+            Object thisObj = param.thisObject;
+            // Walk through fields to find o72.a enclosing instance
+            for (Field f : thisObj.getClass().getDeclaredFields()) {
                 Class<?> fType = f.getType();
                 String typeName = fType.getName();
-                // The enclosing field's class name is like "o72.a" 
-                if (typeName.startsWith("o72.") && !typeName.contains("$")) {
-                    enclosingField = f;
-                    enclosingField.setAccessible(true);
-                    XposedBridge.log("[dolby_beta] EAPIHook v2: enclosing field = " + f.getName() + " type=" + typeName);
+                if (typeName.equals("o72.a") || (typeName.startsWith("o72.") && !typeName.contains("$"))) {
+                    f.setAccessible(true);
+                    Object enclosing = f.get(thisObj);
+                    if (enclosing != null) {
+                        // Search for Uri field in the enclosing's class hierarchy
+                        Class<?> current = enclosing.getClass();
+                        while (current != null && current != Object.class) {
+                            for (Field uf : current.getDeclaredFields()) {
+                                if (uf.getType() == Uri.class) {
+                                    uf.setAccessible(true);
+                                    uri = (Uri) uf.get(enclosing);
+                                    break;
+                                }
+                            }
+                            if (uri != null) break;
+                            current = current.getSuperclass();
+                        }
+                    }
                     break;
                 }
             }
-            if (enclosingField == null) {
-                // Try all fields, look for one whose type has a field named 'k' of type Uri
-                for (Field f : callbackClass.getDeclaredFields()) {
-                    try {
-                        Class<?> fType = f.getType();
-                        for (Field ff : fType.getDeclaredFields()) {
-                            if (ff.getType() == android.net.Uri.class) {
-                                enclosingField = f;
-                                enclosingField.setAccessible(true);
-                                XposedBridge.log("[dolby_beta] EAPIHook v2: enclosing field (heuristic) = " + f.getName() + " type=" + fType.getName());
-                                break;
-                            }
-                        }
-                    } catch (Exception ignored) {}
-                    if (enclosingField != null) break;
-                }
-            }
-
-            // Find Uri field on the o72/a (or o72/f) class
-            if (enclosingField != null) {
-                Class<?> requestClass = enclosingField.getType();
-                // Walk up the class hierarchy to find field 'k' of type Uri
-                Class<?> current = requestClass;
-                while (current != null && current != Object.class) {
-                    try {
-                        for (Field f : current.getDeclaredFields()) {
-                            if (f.getType() == android.net.Uri.class) {
-                                uriField = f;
-                                uriField.setAccessible(true);
-                                XposedBridge.log("[dolby_beta] EAPIHook v2: Uri field = " + f.getName() + " on " + current.getName());
-                                break;
-                            }
-                        }
-                    } catch (Exception ignored) {}
-                    if (uriField != null) break;
-                    current = current.getSuperclass();
-                }
-            }
-
-            if (enclosingField == null) {
-                XposedBridge.log("[dolby_beta] EAPIHook v2: WARNING: could not resolve enclosing field");
-            }
-            if (uriField == null) {
-                XposedBridge.log("[dolby_beta] EAPIHook v2: WARNING: could not resolve Uri field");
-            }
+        } catch (Exception e) {
+            debugLog("[V3-PROCESS] URI extraction failed: " + e.getMessage());
         }
 
-        /**
-         * Get the request URI from the callback's enclosing o72/a instance
-         */
-        private Uri getUriFromCallback(Object callbackInstance) {
-            try {
-                if (enclosingField == null || uriField == null) return null;
-                Object requestObj = enclosingField.get(callbackInstance);
-                if (requestObj == null) return null;
-                return (Uri) uriField.get(requestObj);
-            } catch (Exception e) {
-                XposedBridge.log("[dolby_beta] EAPIHook v2: getUri failed: " + e.getMessage());
-                return null;
+        String uriStr = (uri != null) ? uri.toString() : "null";
+        debugLog("[V3-PROCESS] uri=" + uriStr);
+
+        if (uri == null || uri.getPath() == null || !uri.getPath().contains("/eapi/")) {
+            if (uri != null && uri.getPath() != null) {
+                debugLog("[V3-PROCESS] Not EAPI path: " + uri.getPath());
             }
+            return;
         }
 
-        /**
-         * Get request parameters from URI query string
-         */
-        private LinkedHashMap<String, String> getParamsFromUri(Uri uri) {
-            LinkedHashMap<String, String> map = new LinkedHashMap<>();
-            try {
-                for (String name : uri.getQueryParameterNames()) {
-                    String val = uri.getQueryParameter(name);
-                    map.put(name, val != null ? val : "");
-                }
-            } catch (Exception e) {
-                XposedBridge.log("[dolby_beta] EAPIHook v2: getParamsFromUri failed: " + e.getMessage());
-            }
-            return map;
+        String path = uri.getPath();
+        // Get the current result (what the original method would return)
+        Object currentResult = param.getResult();
+        if (currentResult == null) {
+            debugLog("[V3-PROCESS] result is null");
+            return;
         }
+        String original = currentResult.toString();
+        if (TextUtils.isEmpty(original)) return;
+
+        debugLog("[V3-PROCESS] EAPI path=" + path + " result_len=" + original.length());
+
+        try {
+            if (path.contains("song/enhance/player/url")) {
+                debugLog("[V3-PROCESS] MATCH: player/url, calling modifyPlayer");
+                original = EAPIHelper.modifyPlayer(original);
+                debugLog("[V3-PROCESS] modifyPlayer done, new_len=" + original.length());
+            } else if (path.contains("song/enhance/download/url")) {
+                JSONObject jsonObject = new JSONObject(original);
+                JSONObject object = jsonObject.getJSONObject("data");
+                JSONArray array = new JSONArray();
+                array.put(object);
+                jsonObject.put("data", array);
+                original = EAPIHelper.modifyPlayer(jsonObject.toString())
+                        .replace("[", "").replace("]", "");
+            } else if (path.contains("v1/playlist/manipulate/tracks")) {
+                LinkedHashMap<String, String> params = getParamsFromUri(uri);
+                original = EAPIHelper.modifyManipulate(params, original);
+            } else if (path.contains("song/like")) {
+                LinkedHashMap<String, String> params = getParamsFromUri(uri);
+                original = EAPIHelper.modifyLike(params, original);
+            } else if (path.contains("sound/mobile") || path.contains("page=audio_effect")) {
+                original = EAPIHelper.modifyEffect(original);
+            } else if (path.contains("batch")) {
+                if (original.contains("comment\\/banner\\/get")) {
+                    JSONObject jsonObject = new JSONObject(original);
+                    if (!jsonObject.isNull("/api/content/exposure/comment/banner/get")) {
+                        JSONObject object = new JSONObject();
+                        object.put("code", 200);
+                        object.put("data", new JSONObject());
+                        jsonObject.put("/api/content/exposure/comment/banner/get", object);
+                    }
+                    if (!jsonObject.isNull("/api/v1/content/exposure/comment/banner/get")) {
+                        JSONObject object = jsonObject.getJSONObject("/api/v1/content/exposure/comment/banner/get");
+                        JSONObject data = object.getJSONObject("data");
+                        data.put("count", 0);
+                        data.put("offset", 999999999);
+                        data.put("records", new JSONArray());
+                        data.put("message", "");
+                        object.put("data", data);
+                        jsonObject.put("/api/v1/content/exposure/comment/banner/get", object);
+                    }
+                    original = jsonObject.toString();
+                }
+            } else if (path.contains("upload/cloud/info/v2")) {
+                JSONObject jsonObject = new JSONObject(original);
+                jsonObject = jsonObject.getJSONObject("privateCloud");
+                jsonObject = jsonObject.getJSONObject("simpleSong");
+                original = original.replace("\"waitTime\":60,", "\"waitTime\":5,");
+                CloudDao.getInstance(context).saveSong(Integer.parseInt(jsonObject.getString("id")), original);
+            } else if (path.contains("cloud/pub/v2")) {
+                LinkedHashMap<String, String> paramsMap = getParamsFromUri(uri);
+                String paramsStr = paramsMap.get("params");
+                if (paramsStr == null) paramsStr = "";
+                String songid = EAPIHelper.decrypt(paramsStr).getString("songid");
+                EAPIHelper.uploadCloud(songid);
+                original = CloudDao.getInstance(context).getSong(Integer.parseInt(songid));
+            }
+
+            // Set modified result
+            if (currentResult instanceof JSONObject) {
+                param.setResult(new JSONObject(original));
+            } else {
+                param.setResult(original);
+            }
+        } catch (Exception e) {
+            debugLog("[V3-PROCESS] error: " + e.getMessage());
+        }
+    }
+
+    private LinkedHashMap<String, String> getParamsFromUri(Uri uri) {
+        LinkedHashMap<String, String> map = new LinkedHashMap<>();
+        try {
+            for (String name : uri.getQueryParameterNames()) {
+                String val = uri.getQueryParameter(name);
+                map.put(name, val != null ? val : "");
+            }
+        } catch (Exception e) {
+            debugLog("[V3] getParamsFromUri failed: " + e.getMessage());
+        }
+        return map;
+    }
+
+    private String paramTypesStr(Method m) {
+        Class<?>[] pts = m.getParameterTypes();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < pts.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(pts[i].getSimpleName());
+        }
+        return sb.toString();
     }
 
     /**

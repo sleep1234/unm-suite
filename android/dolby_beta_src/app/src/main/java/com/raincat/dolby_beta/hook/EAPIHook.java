@@ -1,6 +1,7 @@
 package com.raincat.dolby_beta.hook;
 
 import android.content.Context;
+import android.util.Log;
 
 import com.raincat.dolby_beta.helper.EAPIHelper;
 import com.raincat.dolby_beta.helper.SettingHelper;
@@ -43,7 +44,9 @@ public class EAPIHook {
     private static final SimpleDateFormat SDF = new SimpleDateFormat("HH:mm:ss.SSS");
 
     private static void debugLog(String msg) {
-        XposedBridge.log("[dolby_beta] " + msg);
+        String fullMsg = "[dolby_beta] " + msg;
+        XposedBridge.log(fullMsg);
+        Log.d("dolby_beta", msg);
         try {
             FileWriter fw = new FileWriter(DEBUG_LOG_PATH, true);
             fw.write(SDF.format(new Date()) + " " + msg + "\n");
@@ -76,6 +79,7 @@ public class EAPIHook {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             Object result = param.getResult();
+                            debugLog("[V4-PATH-A] e1() afterHookedMethod triggered, result=" + (result != null ? result.getClass().getName() : "null"));
                             if (result == null) return;
 
                             if (result instanceof JSONObject) {
@@ -137,9 +141,10 @@ public class EAPIHook {
                 if (interceptMethod != null) {
                     XposedBridge.hookMethod(interceptMethod, new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            // args: Chain, Request, Response, d, Integer
-                            if (param.args.length < 2) return;
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                // args: Chain, Request, Response, d, Integer
+                                debugLog("[V4-PATH-B] interceptor afterHookedMethod triggered, args=" + param.args.length);
+                                if (param.args.length < 2) return;
 
                             Object request = param.args[1]; // OkHttp Request
                             Object response = param.getResult(); // OkHttp Response

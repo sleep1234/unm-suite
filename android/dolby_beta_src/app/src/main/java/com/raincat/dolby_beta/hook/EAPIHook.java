@@ -2,7 +2,6 @@ package com.raincat.dolby_beta.hook;
 
 import android.content.Context;
 
-import com.raincat.dolby_beta.helper.ClassHelper;
 import com.raincat.dolby_beta.helper.EAPIHelper;
 import com.raincat.dolby_beta.helper.SettingHelper;
 
@@ -119,101 +118,97 @@ public class EAPIHook {
         // ===== PATH B: Hook interceptor.q.a() for OkHttp Response modification =====
         debugLog("[V4-PATH-B] Attempting to hook interceptor.q.a()...");
         try {
-            Class<?> interceptorClazz = ClassHelper.HttpInterceptor.getClazz(context);
-            if (interceptorClazz == null) {
-                debugLog("[V4-PATH-B] HttpInterceptor.getClazz returned null, skipping PATH B");
-            } else {
-                Class<?> interceptorClass = findClassIfExists(interceptorClazz.getName(), cl);
-                if (interceptorClass != null) {
-                    // Find the a() method with 5 args that returns Response
-                    Method interceptMethod = null;
-                    for (Method m : interceptorClass.getDeclaredMethods()) {
-                        if (m.getName().equals("a") && m.getParameterTypes().length == 5) {
-                            String returnType = m.getReturnType().getName();
-                            if (returnType.contains("Response")) {
-                                interceptMethod = m;
-                                break;
-                            }
+            // v9.5.30+: interceptor class name is known from APK analysis
+            String interceptorClassName = "com.netease.cloudmusic.network.interceptor.q";
+            Class<?> interceptorClass = findClassIfExists(interceptorClassName, cl);
+            if (interceptorClass != null) {
+                // Find the a() method with 5 args that returns Response
+                Method interceptMethod = null;
+                for (Method m : interceptorClass.getDeclaredMethods()) {
+                    if (m.getName().equals("a") && m.getParameterTypes().length == 5) {
+                        String returnType = m.getReturnType().getName();
+                        if (returnType.contains("Response")) {
+                            interceptMethod = m;
+                            break;
                         }
                     }
-
-                    if (interceptMethod != null) {
-                        final Method finalMethod = interceptMethod;
-                        XposedBridge.hookMethod(interceptMethod, new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                // args: Chain, Request, Response, d, Integer
-                                if (param.args.length < 2) return;
-
-                                Object request = param.args[1]; // OkHttp Request
-                                Object response = param.getResult(); // OkHttp Response
-
-                                if (request == null || response == null) return;
-
-                                // Get Request URL
-                                String urlStr = null;
-                                try {
-                                    Object url = XposedHelpers.callMethod(request, "url");
-                                    urlStr = XposedHelpers.callMethod(url, "toString").toString();
-                                } catch (Exception e) {
-                                    // Try alternative
-                                    try {
-                                        urlStr = request.toString();
-                                    } catch (Exception ignored) {}
-                                }
-
-                                if (urlStr == null) return;
-
-                                // Check if this is a player-related request
-                                // EAPI requests go to /eapi/... with the actual API path in the body
-                                // But the URL might also contain "player" directly
-                                boolean isPlayerRequest = urlStr.contains("player") ||
-                                        urlStr.contains("/eapi/song") ||
-                                        urlStr.contains("/api/song");
-
-                                if (!isPlayerRequest) return;
-
-                                debugLog("[V4-PATH-B] Player-related request detected: " +
-                                        urlStr.substring(0, Math.min(120, urlStr.length())));
-
-                                // Try to get and modify the Response body
-                                try {
-                                    Object responseBody = XposedHelpers.callMethod(response, "body");
-                                    if (responseBody == null) return;
-
-                                    String bodyStr = XposedHelpers.callMethod(responseBody, "string").toString();
-
-                                    // Check if body contains player data
-                                    if (!bodyStr.contains("fee") && !bodyStr.contains("player")) {
-                                        // Not player data, but we already consumed the body — need to rebuild Response
-                                        rebuildResponse(param, response, bodyStr);
-                                        return;
-                                    }
-
-                                    debugLog("[V4-PATH-B] Response body contains player data, len=" + bodyStr.length());
-
-                                    // Try to modify the player data
-                                    String modifiedBody = tryModifyPlayerBody(bodyStr);
-                                    if (modifiedBody != null) {
-                                        debugLog("[V4-PATH-B] Player data modified, rebuilding Response");
-                                        rebuildResponse(param, response, modifiedBody);
-                                    } else {
-                                        // Body was consumed, need to rebuild even if not modified
-                                        rebuildResponse(param, response, bodyStr);
-                                    }
-                                } catch (Exception e) {
-                                    debugLog("[V4-PATH-B] Error processing Response: " + e.getMessage());
-                                }
-                            }
-                        });
-                        pathBSuccess = true;
-                        debugLog("[V4-PATH-B] Successfully hooked interceptor.q.a()");
-                    } else {
-                        debugLog("[V4-PATH-B] interceptor.q.a(5args) method not found");
-                    }
-                } else {
-                    debugLog("[V4-PATH-B] interceptor class not found");
                 }
+
+                if (interceptMethod != null) {
+                    XposedBridge.hookMethod(interceptMethod, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            // args: Chain, Request, Response, d, Integer
+                            if (param.args.length < 2) return;
+
+                            Object request = param.args[1]; // OkHttp Request
+                            Object response = param.getResult(); // OkHttp Response
+
+                            if (request == null || response == null) return;
+
+                            // Get Request URL
+                            String urlStr = null;
+                            try {
+                                Object url = XposedHelpers.callMethod(request, "url");
+                                urlStr = XposedHelpers.callMethod(url, "toString").toString();
+                            } catch (Exception e) {
+                                // Try alternative
+                                try {
+                                    urlStr = request.toString();
+                                } catch (Exception ignored) {}
+                            }
+
+                            if (urlStr == null) return;
+
+                            // Check if this is a player-related request
+                            // EAPI requests go to /eapi/... with the actual API path in the body
+                            // But the URL might also contain "player" directly
+                            boolean isPlayerRequest = urlStr.contains("player") ||
+                                    urlStr.contains("/eapi/song") ||
+                                    urlStr.contains("/api/song");
+
+                            if (!isPlayerRequest) return;
+
+                            debugLog("[V4-PATH-B] Player-related request detected: " +
+                                    urlStr.substring(0, Math.min(120, urlStr.length())));
+
+                            // Try to get and modify the Response body
+                            try {
+                                Object responseBody = XposedHelpers.callMethod(response, "body");
+                                if (responseBody == null) return;
+
+                                String bodyStr = XposedHelpers.callMethod(responseBody, "string").toString();
+
+                                // Check if body contains player data
+                                if (!bodyStr.contains("fee") && !bodyStr.contains("player")) {
+                                    // Not player data, but we already consumed the body — need to rebuild Response
+                                    rebuildResponse(param, response, bodyStr);
+                                    return;
+                                }
+
+                                debugLog("[V4-PATH-B] Response body contains player data, len=" + bodyStr.length());
+
+                                // Try to modify the player data
+                                String modifiedBody = tryModifyPlayerBody(bodyStr);
+                                if (modifiedBody != null) {
+                                    debugLog("[V4-PATH-B] Player data modified, rebuilding Response");
+                                    rebuildResponse(param, response, modifiedBody);
+                                } else {
+                                    // Body was consumed, need to rebuild even if not modified
+                                    rebuildResponse(param, response, bodyStr);
+                                }
+                            } catch (Exception e) {
+                                debugLog("[V4-PATH-B] Error processing Response: " + e.getMessage());
+                            }
+                        }
+                    });
+                    pathBSuccess = true;
+                    debugLog("[V4-PATH-B] Successfully hooked interceptor.q.a()");
+                } else {
+                    debugLog("[V4-PATH-B] interceptor.q.a(5args) method not found");
+                }
+            } else {
+                debugLog("[V4-PATH-B] interceptor class not found");
             }
         } catch (Exception e) {
             debugLog("[V4-PATH-B] Failed to hook interceptor: " + e.getMessage());

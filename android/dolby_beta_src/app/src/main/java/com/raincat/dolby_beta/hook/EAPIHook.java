@@ -348,7 +348,7 @@ public class EAPIHook {
                                     return;
                                 }
 
-                                String bodyString = XposedHelpers.callMethod(body, "string");
+                                String bodyString = (String) XposedHelpers.callMethod(body, "string");
                                 if (bodyString == null || bodyString.isEmpty()) {
                                     debugLog("[V89] privilege response body is empty");
                                     return;
@@ -436,7 +436,7 @@ public class EAPIHook {
                                         if (response == null) return;
                                         Object body = XposedHelpers.callMethod(response, "body");
                                         if (body == null) return;
-                                        String bodyString = XposedHelpers.callMethod(body, "string");
+                                        String bodyString = (String) XposedHelpers.callMethod(body, "string");
                                         if (bodyString == null || bodyString.isEmpty()) return;
 
                                         debugLog("[V89] >>> async privilege response caught, body len=" + bodyString.length());

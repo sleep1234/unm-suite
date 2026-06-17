@@ -12,6 +12,7 @@ import org.json.JSONObject;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Iterator;
@@ -23,25 +24,24 @@ import de.robv.android.xposed.XposedHelpers;
 import static de.robv.android.xposed.XposedHelpers.findClassIfExists;
 
 /**
- * EAPI Hook — v4: Production version based on debug findings
+ * EAPI Hook — v87: DISCOVERY version
  *
- * v9.5.30 architecture (CONFIRMED by v3 debug):
- * - o72.a$d / o72.a$e: HOOK registers but NEVER fires (dead code in v9.5.30)
- * - o72.a.e1(): FIRES! Returns decrypted EAPI batch JSONObject (457KB+)
- *   Keys are URL paths: {"/api/about/config": {...}, "/api/song/.../player/...": {...}}
- * - interceptor.q.a(Chain,Request,Response,d,int)->Response: FIRES! OkHttp interceptor
+ * Goal: Find WHERE the player API request actually flows.
+ * v86 showed that neither PATH A (e1() startup config) nor PATH B (interceptor.q.a() CDN)
+ * captures /eapi/song/enhance/player requests.
  *
- * v4 strategy — DUAL PATH:
- * PATH A (Primary): Hook o72.a.e1() — modify the decrypted EAPI batch JSON in-place
- *   - Look for keys containing "player" in the batch response
- *   - For player data, clear fee/flag/payed/freeTrialInfo, replace URL via GD API
- * PATH B (Fallback): Hook interceptor.q.a() — modify at OkHttp Response level
- *   - Check Request URL for player endpoints
- *   - Modify Response body if it contains player JSON
+ * v87 strategy — THREE LAYER discovery:
+ * LAYER 1: Hook ALL methods of interceptor.q (a, i, h, c) — which method carries player?
+ * LAYER 2: Hook ALL methods of o72.a (e1, p1, o1, s, p, etc) — which returns player data?
+ * LAYER 3: Hook OkHttp RealCall.execute() + AsyncCall — catch ALL network requests
+ *
+ * For ANY hook: if URL/key contains "player" or "song/enhance", log with [PLAYER-FOUND] prefix.
+ * NO modification — this is purely a discovery build.
  */
 public class EAPIHook {
     private static final String DEBUG_LOG_PATH = "/data/local/tmp/dolby_debug.log";
     private static final SimpleDateFormat SDF = new SimpleDateFormat("HH:mm:ss.SSS");
+    private static int logCounter = 0;
 
     private static void debugLog(String msg) {
         String fullMsg = "[dolby_beta] " + msg;
@@ -54,377 +54,452 @@ public class EAPIHook {
         } catch (IOException ignored) {}
     }
 
+    /** Check if a string contains player-related keywords */
+    private static boolean isPlayerRelated(String s) {
+        if (s == null) return false;
+        return s.contains("player") || s.contains("song/enhance") || s.contains("/eapi/song") || s.contains("/api/song");
+    }
+
+    /** Extract URL from an OkHttp Request object */
+    private static String getUrlFromRequest(Object request) {
+        if (request == null) return null;
+        try {
+            Object url = XposedHelpers.callMethod(request, "url");
+            return XposedHelpers.callMethod(url, "toString").toString();
+        } catch (Exception e1) {
+            try {
+                return request.toString();
+            } catch (Exception e2) {
+                return null;
+            }
+        }
+    }
+
+    /** Extract URL from an OkHttp Request object inside a RealCall */
+    private static String getUrlFromCall(Object call) {
+        if (call == null) return null;
+        try {
+            Object request = XposedHelpers.callMethod(call, "request");
+            return getUrlFromRequest(request);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public EAPIHook(Context context, int versionCode, ClassLoader cl) {
-        debugLog("=== EAPIHook v4 init, versionCode=" + versionCode + " ===");
+        debugLog("=== EAPIHook v87 DISCOVERY init, versionCode=" + versionCode + " ===");
+        logCounter = 0;
 
-        boolean pathASuccess = false;
-        boolean pathBSuccess = false;
+        // ===== LAYER 1: Hook ALL methods of interceptor.q =====
+        hookInterceptorQAllMethods(cl);
 
-        // ===== PATH A: Hook o72.a.e1() for decrypted EAPI batch JSON =====
-        debugLog("[V4-PATH-A] Attempting to hook o72.a.e1()...");
+        // ===== LAYER 2: Hook ALL methods of o72.a =====
+        hookO72AAllMethods(cl);
+
+        // ===== LAYER 3: Hook OkHttp RealCall =====
+        hookOkHttpRealCall();
+
+        debugLog("=== EAPIHook v87 DISCOVERY init complete ===");
+    }
+
+    // ========================================================================
+    // LAYER 1: Hook ALL methods of interceptor.q
+    // ========================================================================
+    private void hookInterceptorQAllMethods(ClassLoader cl) {
+        debugLog("[L1] Attempting to hook ALL methods of interceptor.q...");
+        try {
+            Class<?> interceptorClass = findClassIfExists("com.netease.cloudmusic.network.interceptor.q", cl);
+            if (interceptorClass == null) {
+                debugLog("[L1] interceptor.q class not found");
+                return;
+            }
+
+            Method[] methods = interceptorClass.getDeclaredMethods();
+            debugLog("[L1] interceptor.q has " + methods.length + " declared methods");
+
+            for (Method m : methods) {
+                // Skip synthetic/bridge methods
+                if (m.isSynthetic() || m.isBridge()) continue;
+
+                final String methodName = m.getName();
+                final int argCount = m.getParameterTypes().length;
+                final String returnTypeName = m.getReturnType().getSimpleName();
+
+                // Skip very generic methods (toString, hashCode, equals)
+                if (methodName.equals("toString") || methodName.equals("hashCode") || methodName.equals("equals"))
+                    continue;
+
+                // We especially care about methods that return Response or have 4+ args
+                // But for discovery, let's hook ALL non-trivial methods
+                if (argCount == 0 && returnTypeName.equals("void")) continue; // skip trivial setters
+
+                try {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            logCounter++;
+                            // Only log every call for high-value methods (4+ args, or Response return)
+                            boolean isHighValue = argCount >= 4 || returnTypeName.contains("Response") || returnTypeName.contains("Pair");
+
+                            // Try to extract URL from Request arg
+                            String urlStr = null;
+                            for (Object arg : param.args) {
+                                if (arg != null && arg.getClass().getName().contains("Request")) {
+                                    urlStr = getUrlFromRequest(arg);
+                                    break;
+                                }
+                            }
+
+                            if (urlStr != null && isPlayerRelated(urlStr)) {
+                                debugLog("[L1-PLAYER-FOUND] interceptor.q." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                        " URL=" + urlStr.substring(0, Math.min(200, urlStr.length())));
+                            } else if (isHighValue) {
+                                // Log all high-value method calls with URL (truncated)
+                                if (urlStr != null) {
+                                    debugLog("[L1] interceptor.q." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                            " URL=" + urlStr.substring(0, Math.min(120, urlStr.length())));
+                                } else if (logCounter % 50 == 0) {
+                                    // Periodic: log without URL to show method is firing
+                                    debugLog("[L1] interceptor.q." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                            " (no Request arg, #" + logCounter + ")");
+                                }
+                            }
+                        }
+                    });
+                    debugLog("[L1] Hooked interceptor.q." + methodName + "(" + argCount + ")->" + returnTypeName);
+                } catch (Exception e) {
+                    debugLog("[L1] Failed to hook interceptor.q." + methodName + ": " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            debugLog("[L1] Error hooking interceptor.q: " + e.getMessage());
+        }
+    }
+
+    // ========================================================================
+    // LAYER 2: Hook ALL methods of o72.a
+    // ========================================================================
+    private void hookO72AAllMethods(ClassLoader cl) {
+        debugLog("[L2] Attempting to hook ALL methods of o72.a...");
         try {
             Class<?> eapiClass = findClassIfExists("o72.a", cl);
-            if (eapiClass != null) {
-                // e1() returns JSONObject — the decrypted EAPI batch response
-                Method e1Method = null;
-                for (Method m : eapiClass.getDeclaredMethods()) {
-                    if (m.getName().equals("e1") && m.getParameterTypes().length == 0) {
-                        e1Method = m;
-                        break;
-                    }
-                }
+            if (eapiClass == null) {
+                debugLog("[L2] o72.a class not found");
+                return;
+            }
 
-                if (e1Method != null) {
-                    XposedBridge.hookMethod(e1Method, new XC_MethodHook() {
+            Method[] methods = eapiClass.getDeclaredMethods();
+            debugLog("[L2] o72.a has " + methods.length + " declared methods");
+
+            for (Method m : methods) {
+                if (m.isSynthetic() || m.isBridge()) continue;
+
+                final String methodName = m.getName();
+                final int argCount = m.getParameterTypes().length;
+                final String returnTypeName = m.getReturnType().getSimpleName();
+
+                // Skip trivial methods
+                if (methodName.equals("toString") || methodName.equals("hashCode") || methodName.equals("equals"))
+                    continue;
+
+                try {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             Object result = param.getResult();
-                            debugLog("[V4-PATH-A] e1() afterHookedMethod triggered, result=" + (result != null ? result.getClass().getName() : "null"));
-                            if (result == null) return;
+                            String resultType = result != null ? result.getClass().getSimpleName() : "null";
 
+                            // For JSONObject results: log ALL keys (no 20-key limit like v86)
                             if (result instanceof JSONObject) {
-                                JSONObject batchJson = (JSONObject) result;
-                                // Log the keys of the batch JSON
-                                StringBuilder keysStr = new StringBuilder();
-                                Iterator<String> keys = batchJson.keys();
+                                JSONObject json = (JSONObject) result;
+                                StringBuilder allKeys = new StringBuilder();
+                                Iterator<String> keys = json.keys();
                                 int count = 0;
-                                while (keys.hasNext() && count < 20) {
-                                    keysStr.append(keys.next());
-                                    if (keys.hasNext()) keysStr.append(",");
+                                boolean hasPlayerKey = false;
+                                while (keys.hasNext()) {
+                                    String key = keys.next();
+                                    if (isPlayerRelated(key)) hasPlayerKey = true;
+                                    if (count > 0) allKeys.append("|");
+                                    allKeys.append(key);
                                     count++;
+                                    // Safety: cap at 100 keys to avoid insane log size
+                                    if (count >= 100) {
+                                        allKeys.append("...(truncated)");
+                                        break;
+                                    }
                                 }
-                                debugLog("[V4-PATH-A] e1() JSONObject keys(" + batchJson.length() + "): " + keysStr);
-                                JSONObject modified = processBatchResponse(batchJson);
-                                if (modified != null) {
-                                    param.setResult(modified);
+
+                                if (hasPlayerKey) {
+                                    debugLog("[L2-PLAYER-FOUND] o72.a." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                            " JSONObject(" + json.length() + " keys) ALL_KEYS=" + allKeys.toString());
+                                    // Log the player data specifically
+                                    Iterator<String> keys2 = json.keys();
+                                    while (keys2.hasNext()) {
+                                        String key = keys2.next();
+                                        if (isPlayerRelated(key)) {
+                                            try {
+                                                Object val = json.get(key);
+                                                String valStr = val.toString();
+                                                debugLog("[L2-PLAYER-DATA] key=" + key + " value_len=" + valStr.length() +
+                                                        " preview=" + valStr.substring(0, Math.min(300, valStr.length())));
+                                            } catch (Exception e) {
+                                                debugLog("[L2-PLAYER-DATA] key=" + key + " error reading value: " + e.getMessage());
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Log key summary for all JSONObject returns (but less verbose)
+                                    debugLog("[L2] o72.a." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                            " JSONObject(" + count + " keys): " + allKeys.substring(0, Math.min(300, allKeys.length())));
                                 }
                             } else if (result instanceof String) {
-                                // e1() might return String in some versions
-                                String jsonStr = (String) result;
-                                if (jsonStr.contains("player") || jsonStr.contains("\"fee\"")) {
-                                    debugLog("[V4-PATH-A] e1() returned String containing player data, len=" + jsonStr.length());
-                                    // Try to parse and modify
-                                    try {
-                                        JSONObject batchJson = new JSONObject(jsonStr);
-                                        JSONObject modified = processBatchResponse(batchJson);
-                                        if (modified != null) {
-                                            param.setResult(modified.toString());
-                                        }
-                                    } catch (Exception e) {
-                                        debugLog("[V4-PATH-A] Failed to parse e1() String as JSON: " + e.getMessage());
+                                String str = (String) result;
+                                if (isPlayerRelated(str)) {
+                                    debugLog("[L2-PLAYER-FOUND] o72.a." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                            " String(len=" + str.length() + "): " + str.substring(0, Math.min(200, str.length())));
+                                } else {
+                                    debugLog("[L2] o72.a." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                            " String(len=" + str.length() + ")");
+                                }
+                            } else if (result instanceof JSONArray) {
+                                JSONArray arr = (JSONArray) result;
+                                if (isPlayerRelated(arr.toString())) {
+                                    debugLog("[L2-PLAYER-FOUND] o72.a." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                            " JSONArray(len=" + arr.length() + "): " + arr.toString().substring(0, Math.min(300, arr.toString().length())));
+                                } else {
+                                    debugLog("[L2] o72.a." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                            " JSONArray(len=" + arr.length() + ")");
+                                }
+                            } else {
+                                // Non-JSON result: just log type
+                                // Only log once per method name to avoid spam
+                                debugLog("[L2] o72.a." + methodName + "(" + argCount + ")->" + returnTypeName +
+                                        " result=" + resultType);
+                            }
+                        }
+                    });
+                    debugLog("[L2] Hooked o72.a." + methodName + "(" + argCount + ")->" + returnTypeName);
+                } catch (Exception e) {
+                    debugLog("[L2] Failed to hook o72.a." + methodName + ": " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            debugLog("[L2] Error hooking o72.a: " + e.getMessage());
+        }
+    }
+
+    // ========================================================================
+    // LAYER 3: Hook OkHttp RealCall — catch ALL network requests
+    // ========================================================================
+    private void hookOkHttpRealCall() {
+        debugLog("[L3] Attempting to hook OkHttp RealCall...");
+
+        // Hook RealCall.execute() — synchronous requests
+        try {
+            Class<?> realCallClass = findClassIfExists("okhttp3.RealCall", null);
+            if (realCallClass != null) {
+                for (Method m : realCallClass.getDeclaredMethods()) {
+                    if (m.getName().equals("execute") && m.getParameterTypes().length == 0) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                String url = getUrlFromCall(param.thisObject);
+                                if (url != null) {
+                                    if (isPlayerRelated(url)) {
+                                        debugLog("[L3-PLAYER-FOUND] RealCall.execute() URL=" + url.substring(0, Math.min(200, url.length())));
+                                    } else {
+                                        // Log all execute() URLs (less verbose — only first 80 chars)
+                                        debugLog("[L3] RealCall.execute() URL=" + url.substring(0, Math.min(80, url.length())));
                                     }
                                 }
                             }
-                        }
-                    });
-                    pathASuccess = true;
-                    debugLog("[V4-PATH-A] Successfully hooked o72.a.e1()");
-                } else {
-                    debugLog("[V4-PATH-A] e1() method not found on o72.a");
-                }
-            } else {
-                debugLog("[V4-PATH-A] o72.a class not found");
-            }
-        } catch (Exception e) {
-            debugLog("[V4-PATH-A] Failed to hook e1(): " + e.getMessage());
-        }
-
-        // ===== PATH B: Hook interceptor.q.a() for OkHttp Response modification =====
-        debugLog("[V4-PATH-B] Attempting to hook interceptor.q.a()...");
-        try {
-            // v9.5.30+: interceptor class name is known from APK analysis
-            String interceptorClassName = "com.netease.cloudmusic.network.interceptor.q";
-            Class<?> interceptorClass = findClassIfExists(interceptorClassName, cl);
-            if (interceptorClass != null) {
-                // Find the a() method with 5 args that returns Response
-                Method interceptMethod = null;
-                for (Method m : interceptorClass.getDeclaredMethods()) {
-                    if (m.getName().equals("a") && m.getParameterTypes().length == 5) {
-                        String returnType = m.getReturnType().getName();
-                        if (returnType.contains("Response")) {
-                            interceptMethod = m;
-                            break;
-                        }
+                        });
+                        debugLog("[L3] Hooked RealCall.execute()");
+                        break;
                     }
                 }
+            } else {
+                debugLog("[L3] okhttp3.RealCall not found (unexpected — OkHttp should be present)");
+            }
+        } catch (Exception e) {
+            debugLog("[L3] Failed to hook RealCall.execute(): " + e.getMessage());
+        }
 
-                if (interceptMethod != null) {
-                    XposedBridge.hookMethod(interceptMethod, new XC_MethodHook() {
-                        @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                // args: Chain, Request, Response, d, Integer
-                                debugLog("[V4-PATH-B] interceptor afterHookedMethod triggered, args=" + param.args.length);
-                                if (param.args.length < 2) return;
-
-                            Object request = param.args[1]; // OkHttp Request
-                            Object response = param.getResult(); // OkHttp Response
-
-                            if (request == null || response == null) return;
-
-                            // Get Request URL
-                            String urlStr = null;
-                            try {
-                                Object url = XposedHelpers.callMethod(request, "url");
-                                urlStr = XposedHelpers.callMethod(url, "toString").toString();
-                            } catch (Exception e) {
-                                // Try alternative
+        // Hook the inner AsyncCall.execute() — async requests (most API calls are async)
+        // RealCall$AsyncCall extends NamedRunnable, its execute() method is called for async requests
+        try {
+            Class<?> asyncCallClass = findClassIfExists("okhttp3.RealCall$AsyncCall", null);
+            if (asyncCallClass != null) {
+                for (Method m : asyncCallClass.getDeclaredMethods()) {
+                    // AsyncCall.execute() or the method that calls getResponseWithInterceptorChain()
+                    if (m.getName().equals("execute") || m.getName().equals("run")) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                // Try to access the enclosing RealCall to get the request
                                 try {
-                                    urlStr = request.toString();
-                                } catch (Exception ignored) {}
+                                    // AsyncCall has a reference to the outer RealCall
+                                    // In OkHttp 3.x: field is 'this$0' or accessed via accessor
+                                    Object outerCall = null;
+                                    try {
+                                        outerCall = XposedHelpers.getObjectField(param.thisObject, "this$0");
+                                    } catch (Exception e1) {
+                                        // Try alternate field names
+                                        try {
+                                            outerCall = XposedHelpers.getObjectField(param.thisObject, "val$call");
+                                        } catch (Exception e2) {
+                                            // Try getting from any field that is a RealCall
+                                            for (java.lang.reflect.Field f : param.thisObject.getClass().getDeclaredFields()) {
+                                                if (f.getType().getName().contains("RealCall")) {
+                                                    f.setAccessible(true);
+                                                    outerCall = f.get(param.thisObject);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (outerCall != null) {
+                                        String url = getUrlFromCall(outerCall);
+                                        if (url != null) {
+                                            if (isPlayerRelated(url)) {
+                                                debugLog("[L3-PLAYER-FOUND] AsyncCall." + m.getName() + "() URL=" +
+                                                        url.substring(0, Math.min(200, url.length())));
+                                            } else {
+                                                debugLog("[L3] AsyncCall." + m.getName() + "() URL=" +
+                                                        url.substring(0, Math.min(80, url.length())));
+                                            }
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    // Can't access outer call — just log that async call fired
+                                    debugLog("[L3] AsyncCall." + m.getName() + "() fired (can't get URL: " + e.getMessage() + ")");
+                                }
+                            }
+                        });
+                        debugLog("[L3] Hooked AsyncCall." + m.getName() + "()");
+                    }
+                }
+            } else {
+                debugLog("[L3] okhttp3.RealCall$AsyncCall not found");
+            }
+        } catch (Exception e) {
+            debugLog("[L3] Failed to hook AsyncCall: " + e.getMessage());
+        }
+
+        // Also hook getResponseWithInterceptorChain() on RealCall — this is the method that
+        // actually executes the interceptor chain. It's called by both execute() and AsyncCall.
+        try {
+            Class<?> realCallClass = findClassIfExists("okhttp3.RealCall", null);
+            if (realCallClass != null) {
+                for (Method m : realCallClass.getDeclaredMethods()) {
+                    if (m.getName().equals("getResponseWithInterceptorChain") && m.getParameterTypes().length == 0) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                String url = getUrlFromCall(param.thisObject);
+                                if (url != null) {
+                                    if (isPlayerRelated(url)) {
+                                        debugLog("[L3-PLAYER-FOUND] getResponseWithInterceptorChain() URL=" +
+                                                url.substring(0, Math.min(200, url.length())));
+                                    }
+                                    // Don't log all URLs here — too noisy, RealCall.execute() already covers it
+                                }
                             }
 
-                                if (urlStr == null) return;
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                // Check if the response contains player data
+                                Object result = param.getResult();
+                                if (result != null && result.getClass().getName().contains("Response")) {
+                                    String url = getUrlFromCall(param.thisObject);
+                                    if (url != null && isPlayerRelated(url)) {
+                                        try {
+                                            Object body = XposedHelpers.callMethod(result, "body");
+                                            if (body != null) {
+                                                // Peek at body without consuming it
+                                                Object source = XposedHelpers.callMethod(body, "source");
+                                                if (source != null) {
+                                                    // Try to peek
+                                                    try {
+                                                        Method peekMethod = body.getClass().getMethod("peekString");
+                                                        // Not standard — try reading the buffer
+                                                    } catch (Exception ignored) {}
 
-                                // Log URL for debugging (first 150 chars)
-                                debugLog("[V4-PATH-B] Request URL: " + urlStr.substring(0, Math.min(150, urlStr.length())));
-
-                            // Check if this is a player-related request
-                            // EAPI requests go to /eapi/... with the actual API path in the body
-                            // But the URL might also contain "player" directly
-                            boolean isPlayerRequest = urlStr.contains("player") ||
-                                    urlStr.contains("/eapi/song") ||
-                                    urlStr.contains("/api/song");
-
-                            if (!isPlayerRequest) return;
-
-                            debugLog("[V4-PATH-B] Player-related request detected: " +
-                                    urlStr.substring(0, Math.min(120, urlStr.length())));
-
-                            // Try to get and modify the Response body
-                            try {
-                                Object responseBody = XposedHelpers.callMethod(response, "body");
-                                if (responseBody == null) return;
-
-                                String bodyStr = XposedHelpers.callMethod(responseBody, "string").toString();
-
-                                // Check if body contains player data
-                                if (!bodyStr.contains("fee") && !bodyStr.contains("player")) {
-                                    // Not player data, but we already consumed the body — need to rebuild Response
-                                    rebuildResponse(param, response, bodyStr);
-                                    return;
+                                                    // Just log body size
+                                                    long contentLength = -1;
+                                                    try {
+                                                        Object clObj = XposedHelpers.callMethod(body, "contentLength");
+                                                        if (clObj instanceof Long) contentLength = (Long) clObj;
+                                                        else if (clObj instanceof Integer) contentLength = (Integer) clObj;
+                                                    } catch (Exception ignored) {}
+                                                    debugLog("[L3-PLAYER-FOUND] Response for player URL: body_size=" + contentLength);
+                                                }
+                                            }
+                                        } catch (Exception e) {
+                                            debugLog("[L3-PLAYER-FOUND] Response body read failed: " + e.getMessage());
+                                        }
+                                    }
                                 }
+                            }
+                        });
+                        debugLog("[L3] Hooked RealCall.getResponseWithInterceptorChain()");
+                        break;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            debugLog("[L3] Failed to hook getResponseWithInterceptorChain(): " + e.getMessage());
+        }
 
-                                debugLog("[V4-PATH-B] Response body contains player data, len=" + bodyStr.length());
-
-                                // Try to modify the player data
-                                String modifiedBody = tryModifyPlayerBody(bodyStr);
-                                if (modifiedBody != null) {
-                                    debugLog("[V4-PATH-B] Player data modified, rebuilding Response");
-                                    rebuildResponse(param, response, modifiedBody);
-                                } else {
-                                    // Body was consumed, need to rebuild even if not modified
-                                    rebuildResponse(param, response, bodyStr);
+        // Additional: Hook the EAPI request construction
+        // In v9.5.30, EAPI requests are built via o72.a constructor — hook it to see URI
+        try {
+            Class<?> eapiClass = findClassIfExists("o72.a", null);
+            if (eapiClass != null) {
+                for (java.lang.reflect.Constructor<?> c : eapiClass.getDeclaredConstructors()) {
+                    final int paramCount = c.getParameterTypes().length;
+                    XposedBridge.hookMethod(c, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            // Try to get URI from the constructed object
+                            try {
+                                java.lang.reflect.Field uriField = null;
+                                Class<?> cls = param.thisObject.getClass();
+                                // Walk up the class hierarchy to find Uri field
+                                while (cls != null && cls != Object.class) {
+                                    for (java.lang.reflect.Field f : cls.getDeclaredFields()) {
+                                        if (f.getType() == android.net.Uri.class) {
+                                            uriField = f;
+                                            break;
+                                        }
+                                    }
+                                    if (uriField != null) break;
+                                    cls = cls.getSuperclass();
+                                }
+                                if (uriField != null) {
+                                    uriField.setAccessible(true);
+                                    android.net.Uri uri = (android.net.Uri) uriField.get(param.thisObject);
+                                    if (uri != null) {
+                                        String uriStr = uri.toString();
+                                        if (isPlayerRelated(uriStr)) {
+                                            debugLog("[L3-PLAYER-FOUND] o72.a constructor URI=" +
+                                                    uriStr.substring(0, Math.min(200, uriStr.length())));
+                                        } else {
+                                            debugLog("[L3] o72.a constructor(" + paramCount + ") URI=" +
+                                                    uriStr.substring(0, Math.min(120, uriStr.length())));
+                                        }
+                                    }
                                 }
                             } catch (Exception e) {
-                                debugLog("[V4-PATH-B] Error processing Response: " + e.getMessage());
+                                debugLog("[L3] o72.a constructor(" + paramCount + ") URI extraction failed: " + e.getMessage());
                             }
                         }
                     });
-                    pathBSuccess = true;
-                    debugLog("[V4-PATH-B] Successfully hooked interceptor.q.a()");
-                } else {
-                    debugLog("[V4-PATH-B] interceptor.q.a(5args) method not found");
-                }
-            } else {
-                debugLog("[V4-PATH-B] interceptor class not found");
-            }
-        } catch (Exception e) {
-            debugLog("[V4-PATH-B] Failed to hook interceptor: " + e.getMessage());
-        }
-
-        debugLog("=== EAPIHook v4 init complete: PATH_A=" + pathASuccess + " PATH_B=" + pathBSuccess + " ===");
-    }
-
-    /**
-     * Process the decrypted EAPI batch JSON response.
-     * The batch format: {"/api/path1": {response1}, "/api/path2": {response2}, ...}
-     * We look for keys containing "player" and modify the player data.
-     *
-     * @return modified JSONObject if changes were made, null if no changes needed
-     */
-    private JSONObject processBatchResponse(JSONObject batchJson) {
-        try {
-            boolean modified = false;
-            Iterator<String> keys = batchJson.keys();
-
-            while (keys.hasNext()) {
-                String key = keys.next();
-                // Check if this key is a player-related API path
-                if (key.contains("player") || key.contains("/api/song/enhance")) {
-                    debugLog("[V4-PATH-A] Found player key in batch: " + key);
-
-                    Object value = batchJson.get(key);
-                    if (value instanceof JSONObject) {
-                        JSONObject playerResponse = (JSONObject) value;
-                        JSONObject modifiedPlayer = modifyPlayerResponse(playerResponse);
-                        if (modifiedPlayer != null) {
-                            batchJson.put(key, modifiedPlayer);
-                            modified = true;
-                            debugLog("[V4-PATH-A] Player data modified for key: " + key);
-                        }
-                    }
+                    debugLog("[L3] Hooked o72.a constructor(" + paramCount + ")");
                 }
             }
-
-            return modified ? batchJson : null;
         } catch (Exception e) {
-            debugLog("[V4-PATH-A] processBatchResponse error: " + e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * Modify a player API response JSONObject.
-     * Format: {"code":200, "data":[{song1},{song2},...]} or {"code":200, "data":{"url":"...", "fee":1, ...}}
-     *
-     * @return modified JSONObject if changes were made, null if no changes needed
-     */
-    private JSONObject modifyPlayerResponse(JSONObject playerResponse) {
-        try {
-            if (!playerResponse.has("data")) return null;
-
-            Object data = playerResponse.get("data");
-            boolean modified = false;
-
-            if (data instanceof JSONArray) {
-                // Multiple songs: data is an array
-                JSONArray songs = (JSONArray) data;
-                for (int i = 0; i < songs.length(); i++) {
-                    JSONObject song = songs.getJSONObject(i);
-                    if (modifySongData(song)) {
-                        modified = true;
-                    }
-                }
-            } else if (data instanceof JSONObject) {
-                // Single song: data is an object
-                modified = modifySongData((JSONObject) data);
-            }
-
-            return modified ? playerResponse : null;
-        } catch (Exception e) {
-            debugLog("[V4] modifyPlayerResponse error: " + e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * Modify a single song's data in the player response.
-     * Clear fee/flag/payed/freeTrialInfo and replace URL for trial songs.
-     *
-     * @return true if modifications were made
-     */
-    private boolean modifySongData(JSONObject song) {
-        try {
-            int fee = song.optInt("fee", 0);
-            int flag = song.optInt("flag", 0);
-            int payed = song.optInt("payed", 0);
-            boolean hasFreeTrial = song.has("freeTrialInfo") && !song.isNull("freeTrialInfo");
-            long songId = song.optLong("id", 0);
-            String url = song.optString("url", "");
-
-            // Only modify if the song needs unlocking
-            if (fee == 0 && flag == 0 && payed != 0 && !hasFreeTrial) {
-                return false; // Already free
-            }
-
-            debugLog("[V4] Modifying song id=" + songId + " fee=" + fee + " flag=" + flag +
-                    " payed=" + payed + " hasFreeTrial=" + hasFreeTrial +
-                    " url=" + url.substring(0, Math.min(80, url.length())));
-
-            // Clear VIP restrictions
-            song.put("fee", 0);
-            song.put("flag", 0);
-            song.put("payed", 0);
-            song.put("freeTrialInfo", JSONObject.NULL);
-
-            // For songs that had free trial (30s preview), replace URL via GD API
-            if (hasFreeTrial && songId > 0) {
-                debugLog("[V4] Song " + songId + " had freeTrial, fetching from GD API...");
-                String gdUrl = EAPIHelper.fetchUrlFromGD(songId, 999);
-                if (gdUrl != null) {
-                    song.put("url", gdUrl);
-                    debugLog("[V4] Song " + songId + " URL replaced via GD API");
-                } else {
-                    debugLog("[V4] Song " + songId + " GD API failed, keeping original URL");
-                }
-            }
-
-            return true;
-        } catch (Exception e) {
-            debugLog("[V4] modifySongData error: " + e.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Try to modify player data in a Response body string.
-     * Handles both EAPI batch format and direct player response format.
-     *
-     * @return modified body string if changes were made, null if no changes needed
-     */
-    private String tryModifyPlayerBody(String bodyStr) {
-        try {
-            JSONObject json = new JSONObject(bodyStr);
-
-            // Check if it's a batch response (keys are URL paths)
-            boolean isBatch = false;
-            Iterator<String> keys = json.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                if (key.startsWith("/api/") || key.startsWith("/eapi/")) {
-                    isBatch = true;
-                    break;
-                }
-            }
-
-            if (isBatch) {
-                JSONObject modified = processBatchResponse(json);
-                return modified != null ? modified.toString() : null;
-            } else if (json.has("data") && (json.has("fee") || bodyStr.contains("player"))) {
-                // Direct player response
-                JSONObject modified = modifyPlayerResponse(json);
-                return modified != null ? modified.toString() : null;
-            }
-
-            return null;
-        } catch (Exception e) {
-            debugLog("[V4] tryModifyPlayerBody error: " + e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * Rebuild an OkHttp Response with a new body string.
-     * This is necessary because calling response.body().string() consumes the body.
-     */
-    private void rebuildResponse(XC_MethodHook.MethodHookParam param, Object response, String newBodyStr) {
-        try {
-            // Create a new ResponseBody from the string
-            Object mediaType = null;
-            try {
-                Object oldBody = XposedHelpers.callMethod(response, "body");
-                mediaType = XposedHelpers.callMethod(oldBody, "contentType");
-            } catch (Exception ignored) {}
-
-            // okhttp3.ResponseBody.create(contentType, content)
-            Class<?> responseBodyClass = XposedHelpers.findClass("okhttp3.ResponseBody", null);
-            Object newBody;
-            if (mediaType != null) {
-                newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create",
-                        mediaType, newBodyStr);
-            } else {
-                newBody = XposedHelpers.callStaticMethod(responseBodyClass, "create",
-                        newBodyStr);
-            }
-
-            // response.newBuilder().body(newBody).build()
-            Object builder = XposedHelpers.callMethod(response, "newBuilder");
-            Object builderWithBody = XposedHelpers.callMethod(builder, "body", newBody);
-            Object newResponse = XposedHelpers.callMethod(builderWithBody, "build");
-
-            param.setResult(newResponse);
-        } catch (Exception e) {
-            debugLog("[V4] rebuildResponse error: " + e.getMessage());
+            debugLog("[L3] Failed to hook o72.a constructors: " + e.getMessage());
         }
     }
 }

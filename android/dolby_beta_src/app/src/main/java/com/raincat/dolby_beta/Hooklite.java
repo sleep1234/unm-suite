@@ -93,7 +93,7 @@ public class Hooklite {
                                 //获取账号信息
                                 new UserProfileHook(context);
                                 //网络访问
-                                new EAPIHook(context);
+                                new EAPIHook(context, versionCode, context.getClassLoader());
                                 //下载MD5校验
                                 new DownloadMD5Hook(context);
                                 //精简tab
@@ -142,7 +142,7 @@ public class Hooklite {
                                 public void onReceive(Context c, Intent intent) {
                                     if (msg_hook_play_process.equals(intent.getAction())) {
                                         ClassHelper.getCacheClassList(context, versionCode, () -> {
-                                            new EAPIHook(context);
+                                            new EAPIHook(context, versionCode, context.getClassLoader());
                                             new CdnHook(context, versionCode);
                                         });
                                     }

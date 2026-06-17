@@ -16,15 +16,9 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
 /**
- * <pre>
- *     author : RainCat
- *     e-mail : nining377@gmail.com
- *     time   : 2021/09/13
- *     desc   : 绕过CDN责任链拦截器检测
- *     version: 1.0
- * </pre>
+ * CDN责任链拦截器检测绕过
+ * Hooks interceptor.q methods to bypass CDN response validation.
  */
-
 public class CdnHook {
     private static final String DEBUG_LOG_PATH = "/data/local/tmp/dolby_debug.log";
     private static final SimpleDateFormat SDF = new SimpleDateFormat("HH:mm:ss.SSS");
@@ -50,31 +44,16 @@ public class CdnHook {
         for (Method m : methods) {
             final String methodSig = m.getDeclaringClass().getSimpleName() + "." + m.getName() +
                     "(args=" + m.getParameterTypes().length + ")->" + m.getReturnType().getSimpleName();
-            debugLog("[CdnHook] hooking " + methodSig);
             XposedBridge.hookMethod(m, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     super.beforeHookedMethod(param);
-                    debugLog("[CdnHook-CALL] " + methodSig + " FIRED! args=" + param.args.length +
-                            " argTypes=" + argTypesStr(param.args));
-                    // Log args[2] type (the replacement value)
+                    // Set result to args[2] (the Response/pre-computed result)
                     if (param.args.length > 2 && param.args[2] != null) {
-                        debugLog("[CdnHook-CALL] args[2] type=" + param.args[2].getClass().getName());
+                        param.setResult(param.args[2]);
                     }
-                    param.setResult(param.args[2]);
-                    debugLog("[CdnHook-CALL] " + methodSig + " setResult to args[2]");
                 }
             });
         }
-    }
-
-    private String argTypesStr(Object[] args) {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < args.length; i++) {
-            if (i > 0) sb.append(",");
-            sb.append(args[i] != null ? args[i].getClass().getSimpleName() : "null");
-        }
-        sb.append("]");
-        return sb.toString();
     }
 }

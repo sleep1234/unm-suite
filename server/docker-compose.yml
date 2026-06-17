@@ -6,8 +6,8 @@ services:
     container_name: unm-server
     restart: unless-stopped
     ports:
-      - "8080:8080"   # HTTP 代理端口
-      - "8081:8081"   # HTTPS 代理端口
+      - "18080:8080"   # HTTP 代理端口
+      - "18081:8081"   # HTTPS 代理端口
     environment:
       # 核心功能开关
       - ENABLE_FLAC=true                    # 启用无损音质获取

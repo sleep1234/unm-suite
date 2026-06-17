@@ -209,23 +209,24 @@ public class EAPIHook {
                 lambdaClass = findClassIfExists(lambdaName, cl);
             }
             if (lambdaClass != null) {
-                debugLog("[V3-LEVEL4] Found lambda: " + lambdaName);
+                final String finalLambdaName = lambdaName;
+                debugLog("[V3-LEVEL4] Found lambda: " + finalLambdaName);
                 for (Method m : lambdaClass.getDeclaredMethods()) {
                     if (Modifier.isAbstract(m.getModifiers())) continue;
                     try {
                         final String methodName = m.getName();
                         final String methodDesc = m.getReturnType().getSimpleName() + " " + methodName +
                                 "(" + paramTypesStr(m) + ")";
-                        debugLog("[V3-LEVEL4] " + lambdaName + "." + methodDesc);
+                        debugLog("[V3-LEVEL4] " + finalLambdaName + "." + methodDesc);
                         XposedBridge.hookMethod(m, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                debugLog("[V3-LEVEL4-CALL] " + lambdaName + "." + methodName + " CALLED! args=" + param.args.length);
+                                debugLog("[V3-LEVEL4-CALL] " + finalLambdaName + "." + methodName + " CALLED! args=" + param.args.length);
                             }
                         });
                         lambdaCount++;
                     } catch (Exception e) {
-                        debugLog("[V3-LEVEL4] failed to hook " + lambdaName + "." + m.getName() + ": " + e.getMessage());
+                        debugLog("[V3-LEVEL4] failed to hook " + finalLambdaName + "." + m.getName() + ": " + e.getMessage());
                     }
                 }
             }
